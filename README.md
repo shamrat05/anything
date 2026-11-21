@@ -2,7 +2,7 @@
 
 # Anything
 
-**Find anything fast with Anything.**
+**Building the fastest way to find anything on Android.**
 
 Search Android filenames as you type. Anything is a free, MIT-licensed file search and file manager by CallCraft Studio. The index stays on your phone. Android 8.0 and newer.
 
