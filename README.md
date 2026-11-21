@@ -8,7 +8,7 @@ Search Android filenames as you type. Anything is a free, MIT-licensed file sear
 
 [Download build 2](https://github.com/shamrat05/anything/releases/tag/v1.0.0-build.2) · [User guide](GUIDE.md) · [Privacy](https://callcraftstudio.com/anything/privacy/) · [Support development](https://callcraftstudio.com/anything/support/)
 
-[![Support on Patreon](store/assets/support-on-patreon.svg)](https://www.patreon.com/cw/Shamrat05/membership)
+[![Support on Patreon](store/assets/support-on-patreon.svg)](https://www.patreon.com/cw/Shamrat05/membership) [![Support with USDT](store/assets/support-with-usdt.svg)](https://callcraftstudio.com/anything/support/#usdt-tron)
 
 ## Download
 
@@ -70,6 +70,8 @@ If Anything saves you time, you can [support its development on Patreon](https:/
 Send **USDT on Tron (TRC20)** only. The minimum deposit is **more than 0.01 USDT**. No memo or tag is needed.
 
 `TCURP3QhbasypbXJkb1ggTzQBYruYsuibv`
+
+[![Support with USDT](store/assets/support-with-usdt.svg)](https://callcraftstudio.com/anything/support/#usdt-tron)
 
 <img src="store/assets/anything-usdt-tron-qr.svg" width="216" height="216" alt="QR code for the USDT on Tron (TRC20) receiving address">
 
