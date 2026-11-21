@@ -76,6 +76,8 @@ Other custom runners: UpdateProbe, OperationUpdateProbe, DeviceSearchProbe, File
 
 RootScannerProbe additionally exercises the packaged initial native scanner, metadata precision, special filenames, cancellation and failure messages. It defaults to an unprivileged owned fixture and is included in API 29 CI without a test-app root grant. Its optional `root=true` mode requires an existing grant.
 
+`HelpProbe` checks the three help tabs, report validation, opt-in diagnostic preview, and correct composition of an email draft. It does not send email, open the web form, or request root.
+
 Every invocation must report both `INSTRUMENTATION_RESULT: passed=true` and `INSTRUMENTATION_CODE: -1`. Shell exit status alone is insufficient.
 
 After committing the checked source, `python3 scripts/package.py` archives `HEAD`, validates distributions and writes checksums under `dist/`. Outputs include Full and Play APKs, the Play AAB, test APK, source ZIP, store assets and reports. Updates must retain the same signing certificate and data.

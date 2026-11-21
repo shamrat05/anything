@@ -13,8 +13,9 @@ if [[ -z "$sdk_path" || ! -f "$sdk_path/platforms/android-36/android.jar" ]]; th
   echo 'Set ANDROID_HOME to an SDK containing platforms/android-36/android.jar.' >&2
   exit 1
 fi
-javac --release 8 -cp "$sdk_path/platforms/android-36/android.jar" -d app/build/protocol-classes core/src/main/java/dev/fastsearch/core/FileEntry.java app/src/main/java/dev/fastsearch/android/IndexRootScanner.java app/src/test/java/dev/fastsearch/android/IndexProtocolTest.java
+javac --release 8 -cp "$sdk_path/platforms/android-36/android.jar" -d app/build/protocol-classes core/src/main/java/dev/fastsearch/core/FileEntry.java app/src/main/java/dev/fastsearch/android/{IndexRootScanner,SupportLog}.java app/src/test/java/dev/fastsearch/android/{IndexProtocolTest,SupportLogTest}.java
 java -cp app/build/protocol-classes dev.fastsearch.android.IndexProtocolTest
+java -cp app/build/protocol-classes dev.fastsearch.android.SupportLogTest
 python3 scripts/test-rootindex.py
 javac --release 8 -Xlint:all,-options -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/PreviewText.java app/src/main/java/dev/fastsearch/android/ZipDirectory.java app/src/test/java/dev/fastsearch/android/PreviewDataTest.java
 java -cp app/build/preview-test-classes dev.fastsearch.android.PreviewDataTest

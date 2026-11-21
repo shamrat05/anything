@@ -38,6 +38,6 @@ The APK is written to `app/build/outputs/apk/full/debug/app-full-debug.apk`. Use
 
 ## Support and license
 
-See [Support](SUPPORT.md) for bug reports and [Privacy](store/PRIVACY.md) for how the app handles data.
+Open **More actions → Help** for search examples, troubleshooting, and bug reports. See [Support](SUPPORT.md) for reporting options and [Privacy](store/PRIVACY.md) for how the app handles data.
 
 Copyright © 2026 CallCraft Studio. The project’s original software and documentation are licensed under the [MIT License](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for separately licensed material.

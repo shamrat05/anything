@@ -32,4 +32,6 @@ Revoke permissions in Android Settings. Clear recent or saved searches from thei
 
 Emailing support sends the information you include through your email provider and our email service. Do not include private file contents or contact/message details unless needed for your request. We use support correspondence to answer you and resolve the issue.
 
+The Help screen can include optional diagnostics in a report you choose to send. These include version information, counts, recent Anything events held in memory, and app exit reasons where Android provides them. Anything does not collect system logs, file paths, searches, contacts or messages for diagnostics. You can review the report before opening an email draft or copying it to the CallCraft Studio contact form. Nothing is uploaded by the app.
+
 This notice will be updated when the app's data handling changes. The current policy is published at [callcraftstudio.com/anything/privacy/](https://callcraftstudio.com/anything/privacy/).

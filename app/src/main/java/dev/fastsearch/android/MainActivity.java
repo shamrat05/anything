@@ -679,7 +679,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         scope.add("Root folders").setCheckable(true).setChecked(index.isRootEnabled());scope.add("Shared storage").setCheckable(true).setChecked(!index.isRootEnabled());
         storage.add("File access");storage.add("Index statistics");
         SubMenu appearance=m.addSubMenu("Appearance");appearance.add("Theme");appearance.add("Show status").setCheckable(true).setChecked(prefs.getBoolean("showStatus",true));appearance.add("Touch feedback").setCheckable(true).setChecked(prefs.getBoolean("haptics",true));
-        m.addSubMenu("Help").add("Search syntax");
+        m.add("Help");
         showMenu(anchor,m,"More actions",this::action);}
     private void showMenu(View anchor,Menu model,String title,java.util.function.Consumer<String> action){
         if(navigationMenu!=null)navigationMenu.dismiss();
@@ -701,7 +701,11 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         case "Show status":prefs.edit().putBoolean("showStatus",!prefs.getBoolean("showStatus",true)).apply();updateStatusVisibility();break;
         case "Theme":new AlertDialog.Builder(this).setTitle("Theme").setSingleChoiceItems(new String[]{"System","Light","Dark"},prefs.getInt("theme",0),(dialog,which)->{
             prefs.edit().putInt("theme",which).apply();dialog.dismiss();recreate();}).setNegativeButton("Close",null).show();break;
-        case "Search syntax":dialog("Search syntax","photo vacation\next:jpg;png\nfile: report\nfolder: music\npath:/data\nsize:>10mb\n\nSpaces combine terms. Use | for alternatives, ! to exclude, < > to group, and quotes for phrases. * and ? match wildcards.\n\nRefresh updates root folders.");break;
+        case "Help":
+            if(activeSheet!=null)activeSheet.dismiss();
+            AppSheet help=new HelpSheet(this,index).dialog();activeSheet=help;
+            help.setOnDismissListener(d->{if(activeSheet==help)activeSheet=null;});
+            help.show();break;
     }}
     private void updateSearchControls(){
         boolean scoped=folderScope!=null&&!isDeviceCategory(category.getSelectedItemPosition()),hasQuery=query.length()>0;

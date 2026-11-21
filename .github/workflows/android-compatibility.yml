@@ -72,7 +72,7 @@ jobs:
           adb shell input keyevent 82
           timeout 120 adb install --no-streaming -t app/build/outputs/apk/full/debug/app-full-debug.apk
           timeout 120 adb install --no-streaming -t app/build/outputs/apk/androidTest/full/debug/app-full-debug-androidTest.apk
-          for probe in RootScannerProbe RenamePreviewProbe PreviewProbe OperationUpdateProbe UpdateProbe ThumbnailEfficiencyProbe UiProbe; do
+          for probe in RootScannerProbe RenamePreviewProbe PreviewProbe OperationUpdateProbe UpdateProbe ThumbnailEfficiencyProbe UiProbe HelpProbe; do
             probe_args=()
             if [[ "$probe" == UiProbe ]]; then probe_args=(-e pinchOnly true); fi
             timeout 180 adb shell am instrument -w -r -e root false "${probe_args[@]}" com.callcraftstudio.anything.fresh.test/dev.fastsearch.android.$probe > compatibility-results/$probe.log

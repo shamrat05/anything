@@ -725,6 +725,7 @@ public final class FileIndex {
             deniedDirectories.clear();
             snapshot = Collections.emptyList();
             loaded = true;
+            SupportLog.record(SupportLog.Event.CACHE_LOAD_FAILED, Boolean.TRUE.equals(activeRootMode), 0, 0);
             publishStable("Saved index could not be loaded. Refresh to rebuild. " + failureMessage(failure));
         }
     }
@@ -758,6 +759,7 @@ public final class FileIndex {
         fullScanStarts++;
         final int version = scopeVersion.get();
         final boolean root = Boolean.TRUE.equals(activeRootMode);
+        SupportLog.record(SupportLog.Event.INDEX_STARTED, root, 0, 0);
         ScanData found = new ScanData();
         long started = SystemClock.elapsedRealtime();
         lastProgress = 0;
@@ -811,18 +813,22 @@ public final class FileIndex {
             scannedThisProcess = true;
             reconcileNeeded = false;
             committed = true;
+            SupportLog.record(SupportLog.Event.INDEX_SAVED, root, completed.size(), duration);
             syncObservers();
             publishStable("");
         } catch (CancellationException cancelled) {
+            SupportLog.record(SupportLog.Event.INDEX_STOPPED, root, 0, 0);
             found.clear();
             syncObservers();
             if (version == scopeVersion.get()) publishStable("", "Indexing stopped. Previous completed index retained.");
         } catch (OutOfMemoryError memory) {
             if (!committed) found.clear();
+            SupportLog.record(SupportLog.Event.INDEX_MEMORY_LIMIT, root, 0, 0);
             syncObservers();
             publishStable("Index exceeded available memory. " + (committed
                     ? "Completed cache was saved." : "Previous completed index retained."));
         } catch (IOException | RuntimeException failure) {
+            SupportLog.record(SupportLog.Event.INDEX_FAILED, root, 0, 0);
             if (!committed) found.clear();
             syncObservers();
             publishStable(failureMessage(failure));
@@ -1058,6 +1064,7 @@ public final class FileIndex {
         } catch (RuntimeException | OutOfMemoryError failure) {
             additions.clear();
             reconcileNeeded = true;
+            SupportLog.record(SupportLog.Event.UPDATE_FAILED, Boolean.TRUE.equals(activeRootMode), 0, 0);
             publishStable("Live update could not be saved. Refresh to reconcile. " + failureMessage(failure));
         }
     }

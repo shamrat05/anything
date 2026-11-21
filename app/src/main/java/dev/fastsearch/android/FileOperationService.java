@@ -214,6 +214,10 @@ public final class FileOperationService extends Service {
             }
             // Final listeners may read the clipboard, so publish only after its
             // acknowledged move entries have been removed.
+            SupportLog.record(deleting ? SupportLog.Event.DELETE_FINISHED : renaming != null
+                    ? SupportLog.Event.RENAME_FINISHED : move ? SupportLog.Event.MOVE_FINISHED
+                    : SupportLog.Event.COPY_FINISHED, clipboard != null && clipboard.root,
+                    committed.length(), total);
             publish(outcome != null ? outcome : new State(false, true, committed.length(), total,
                     "File operation stopped", "File operation stopped."));
             taskFinished = true;

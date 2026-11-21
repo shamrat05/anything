@@ -104,6 +104,7 @@ final class IndexRootScanner {
         if (!traversalRoot.startsWith("/") || traversalRoot.indexOf('\0') >= 0) {
             throw new IllegalArgumentException("Traversal root must be an absolute path.");
         }
+        boolean recordRootScan = deviceNamespace && modeFlag.isEmpty();
         try {
             checkCancelled();
             // The app and su may have different mount namespaces, so read root's view.
@@ -168,9 +169,16 @@ final class IndexRootScanner {
             }
             String warning = errors.otherErrors > 0
                     ? errors.otherErrors + " traversal errors; refresh to reconcile." : "";
+            if (recordRootScan) {
+                SupportLog.record(SupportLog.Event.ROOT_SCAN_FINISHED, true, errors.accessErrors, errors.otherErrors);
+            }
             return new Result(errors.accessErrors, errors.otherErrors, excluded.size(), warning);
         } catch (IOException failure) {
             checkCancelled();
+            if (recordRootScan) {
+                SupportLog.record(rootGranted ? SupportLog.Event.ROOT_SCAN_FAILED : SupportLog.Event.ROOT_NO_HANDSHAKE,
+                        true, 0, 0);
+            }
             String detail = failure.getMessage() == null ? "" : failure.getMessage();
             if (!detail.startsWith("Root access failed.") && !detail.startsWith("Root indexing failed.")) {
                 throw new IOException(rootFailure(detail), failure);
