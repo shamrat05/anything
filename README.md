@@ -43,6 +43,14 @@ The APK is written to `app/build/outputs/apk/full/debug/app-full-debug.apk`. Use
 
 If Anything saves you time, you can [support its development on Patreon](https://www.patreon.com/cw/Shamrat05/membership) with an optional $3, $10 or $15 monthly contribution. It helps fund maintenance, bug fixes and testing across Android devices. Everyone gets the same app features. See the [Anything support page](https://callcraftstudio.com/anything/support/) for funding and app support links.
 
+### USDT on Tron (TRC20)
+
+Send **USDT on Tron (TRC20)** only. The minimum deposit is **more than 0.01 USDT**. No memo or tag is needed.
+
+`TCURP3QhbasypbXJkb1ggTzQBYruYsuibv`
+
+<img src="store/assets/anything-usdt-tron-qr.svg" width="216" height="216" alt="QR code for the USDT on Tron (TRC20) receiving address">
+
 ## License
 
 Copyright © 2026 CallCraft Studio. The project’s original software and documentation are licensed under the [MIT License](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for separately licensed material.
