@@ -69,9 +69,11 @@ If Anything saves you time, you can [support its development on Patreon](https:/
 
 Send **USDT on Tron (TRC20)** only. The minimum deposit is **more than 0.01 USDT**. No memo or tag is needed.
 
-`TCURP3QhbasypbXJkb1ggTzQBYruYsuibv`
+```
+TCURP3QhbasypbXJkb1ggTzQBYruYsuibv
+```
 
-[![Support with USDT](store/assets/support-with-usdt.svg)](https://callcraftstudio.com/anything/support/#usdt-tron)
+[![Support on Patreon](store/assets/support-on-patreon.svg)](https://www.patreon.com/cw/Shamrat05/membership) [![Support with USDT](store/assets/support-with-usdt.svg)](https://callcraftstudio.com/anything/support/#usdt-tron)
 
 <img src="store/assets/anything-usdt-tron-qr.svg" width="216" height="216" alt="QR code for the USDT on Tron (TRC20) receiving address">
 
