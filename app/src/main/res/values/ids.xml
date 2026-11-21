@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item type="id" name="query" />
+    <item type="id" name="clear_search" />
+    <item type="id" name="browse_locations" />
+    <item type="id" name="results" />
+    <item type="id" name="status" />
+    <item type="id" name="result_section" />
+    <item type="id" name="storage_mode" />
+    <item type="id" name="refresh" />
+    <item type="id" name="category" />
+    <item type="id" name="view_mode" />
+    <item type="id" name="file_subtypes" />
+    <item type="id" name="sort" />
+    <item type="id" name="search_options" />
+    <item type="id" name="overflow" />
+    <item type="id" name="menu_back" />
+    <item type="id" name="menu_title" />
+    <item type="id" name="selection_bar" />
+    <item type="id" name="selection_count" />
+    <item type="id" name="file_icon" />
+    <item type="id" name="paste" />
+    <item type="id" name="delete" />
+    <item type="id" name="preview_path" />
+    <item type="id" name="preview_stage" />
+    <item type="id" name="preview_previous" />
+    <item type="id" name="preview_next" />
+    <item type="id" name="preview_select" />
+    <item type="id" name="preview_copy" />
+    <item type="id" name="preview_move" />
+    <item type="id" name="preview_paste" />
+    <item type="id" name="preview_delete" />
+    <item type="id" name="media_seek" />
+    <item type="id" name="media_play" />
+    <item type="id" name="media_speed" />
+    <item type="id" name="media_volume" />
+    <item type="id" name="media_brightness" />
+    <item name="thumbnail_watch" type="id" />
+    <item name="thumbnail_placeholder" type="id" />
+</resources>

@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Run the actual native scanner against owned trees; independent lstat is the oracle."""
+from pathlib import Path
+import os
+import shutil
+import subprocess
+import tempfile
+
+root = Path(__file__).resolve().parent.parent
+binary = root / 'app/build/rootindex-host'
+binary.parent.mkdir(parents=True, exist_ok=True)
+compiler = shutil.which('cc') or shutil.which('clang')
+if not compiler:
+    raise SystemExit('A C compiler is required for native scanner checks.')
+subprocess.run([compiler, '-std=c11', '-pthread', '-O2', '-Wall', '-Wextra', '-Werror',
+                str(root / 'app/src/main/cpp/rootindex.c'), '-o', str(binary)], check=True)
+assertions = 0
+
+
+def check(value, message):
+    global assertions
+    assertions += 1
+    if not value:
+        raise AssertionError(message)
+
+
+def scan(path, *exclusions):
+    result = subprocess.run([str(binary), str(path), *map(str, exclusions)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+    check(result.returncode == 0 and not result.stderr, 'native fixture scan completes without errors')
+    fields = result.stdout.split(b'\0')
+    check(fields.pop() == b'' and len(fields) % 4 == 0, 'complete NUL-framed records')
+    records = {}
+    for offset in range(0, len(fields), 4):
+        mode, size, modified, name = fields[offset:offset + 4]
+        check(len(mode) == 10 and mode[:1] in {b'd', b'-'}, 'only regular files/directories emitted')
+        key = Path(os.fsdecode(name))
+        check(key not in records, 'one row per literal path')
+        follows_link = exclusions[:1] == ('--children',) or (exclusions[:1] == ('--tree',) and key == path)
+        metadata = key.stat() if follows_link else key.lstat()
+        check(int(modified) == metadata.st_mtime_ns // 1_000_000, 'exact independent millisecond timestamp')
+        check(int(size) == (0 if mode[:1] == b'd' else metadata.st_size), 'exact size/type metadata')
+        records[key] = mode[:1]
+    return records
+
+
+with tempfile.TemporaryDirectory(prefix="rootindex-'[]* ") as temporary:
+    fixture = Path(temporary)
+    names = ['plain.txt', 'with space', "apostrophe'", 'tab\there', 'line\nbreak',
+             '日本語-é', 'literal%_[]*?', '$(touch BAD)', '.hidden']
+    for name in names:
+        file = fixture / name
+        file.write_bytes(b'12345')
+        os.utime(file, ns=(1_700_000_000_123_000_000, 1_700_000_000_123_000_000))
+    nested = fixture / "literal'[*]?"
+    nested.mkdir()
+    (nested / 'child').write_bytes(b'child')
+    (fixture / 'loop').symlink_to(fixture, target_is_directory=True)
+    os.mkfifo(fixture / 'fifo')
+    found = scan(fixture)
+    check(set(found) == {fixture, nested, nested / 'child', *(fixture / name for name in names)},
+          'exact tree, including hidden and special names, excludes symlinks and FIFOs')
+    check(not (fixture / 'BAD').exists(), 'literal filename never runs a command')
+    excluded = scan(fixture, nested)
+    check(nested not in excluded and nested / 'child' not in excluded, 'literal metacharacter exclusion prunes descendants')
+    sibling = fixture / (nested.name + '-sibling')
+    sibling.mkdir()
+    (nested / '.dot').write_bytes(b'hidden')
+    found = scan(fixture, nested)
+    check(sibling in found, 'exclusion has a path boundary and retains similarly named siblings')
+    check(scan(fixture, fixture) == {}, 'excluded traversal root emits no rows')
+    shallow = scan(fixture, '--children')
+    check(nested in shallow and nested / 'child' not in shallow and shallow[fixture / 'loop'] == b'd',
+          'folder browsing shows immediate children and directory links without traversing them')
+    scoped = scan(fixture / 'loop', '--tree')
+    check(fixture / 'loop' / nested.name / 'child' in scoped,
+          'scoped tree supports an explicitly opened directory alias')
+    check(fixture / 'loop' / 'loop' not in scoped,
+          'scoped tree does not descend into nested aliases')
+    for mode, total in [('--map', 11), ('--map-visible', 5)]:
+        result = subprocess.run([str(binary), str(fixture), mode], capture_output=True, timeout=10)
+        check(result.returncode == 0 and not result.stderr, 'native map completes')
+        fields = result.stdout.split(b'\0')
+        mapped = {Path(os.fsdecode(fields[i+3])): int(fields[i+1]) for i in range(0, len(fields)-1, 4)}
+        check(mapped[nested] == total and mapped[sibling] == 0 and mapped[fixture / 'plain.txt'] == 5,
+              'map emits exact totals for immediate children including empty folders')
+        check((fixture / '.hidden' in mapped) == (mode == '--map'), 'map honors hidden-file preference')
+        check(not any(path.parent == nested for path in mapped) and fixture / 'loop' not in mapped,
+              'map does not stream descendants or traverse aliases')
+    parallel = fixture / 'parallel'
+    parallel.mkdir()
+    expected = {parallel}
+    for i in range(48):
+        parent = parallel / str(i)
+        parent.mkdir()
+        leaf = parent / ('long-name-' + str(i))
+        leaf.write_bytes(b'example')
+        expected.update((parent, leaf))
+    for attempt in range(3):
+        check(set(scan(parallel)) == expected, 'concurrent traversal emits every expected row once')
+    missing = subprocess.run([str(binary), str(fixture / 'missing')], capture_output=True, timeout=10)
+    check(missing.returncode == 1 and not missing.stdout and bool(missing.stderr), 'missing root reports traversal error')
+    invalid = subprocess.run([str(binary), 'relative'], capture_output=True, timeout=10)
+    check(invalid.returncode == 2 and not invalid.stdout, 'invalid root reports fatal input error')
+
+print(f'PASS {assertions} native scanner assertions: metadata, names, types, exclusions and errors.')

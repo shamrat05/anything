@@ -1,0 +1,55 @@
+plugins { id 'com.android.application' }
+dependencies { implementation files('../third_party/re2j/re2j-1.8.jar', '../third_party/androidsvg/androidsvg-1.4.jar', '../third_party/commonmark/commonmark-0.24.0.jar', '../third_party/commonmark/commonmark-ext-gfm-tables-0.24.0.jar') }
+def appId = providers.gradleProperty('fastsearchApplicationId').getOrElse('com.callcraftstudio.anything')
+def signingProperties = new Properties()
+def signingFile = rootProject.file('release-signing.properties')
+if (signingFile.exists()) signingFile.withInputStream { signingProperties.load(it) }
+android {
+    namespace 'dev.fastsearch.android'
+    compileSdk 36
+    defaultConfig {
+        applicationId appId
+        manifestPlaceholders = [testedApplicationId: appId]
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName '1.0.0'
+        resValue 'string', 'app_name', appId.endsWith('.fresh') ? 'Anything test' : 'Anything'
+        testInstrumentationRunner 'dev.fastsearch.android.IndexProbe'
+    }
+    sourceSets {
+        main.java.srcDirs += '../core/src/main/java'
+        main.jniLibs.srcDirs += "$buildDir/generated/jniLibs"
+    }
+    packaging { jniLibs { useLegacyPackaging = true; keepDebugSymbols += ['**/libfileops.so'] } }
+    buildFeatures { buildConfig true }
+    flavorDimensions += 'distribution'
+    productFlavors {
+        full { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'true' }
+        play { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'false' }
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+    signingConfigs {
+        independent {
+            if (signingFile.exists()) {
+                storeFile file(signingProperties['storeFile'])
+                storePassword signingProperties['storePassword']
+                keyAlias signingProperties['keyAlias']
+                keyPassword signingProperties['keyPassword']
+            } else { initWith signingConfigs.debug }
+        }
+    }
+    buildTypes {
+        debug { signingConfig signingConfigs.independent }
+        release { minifyEnabled false; signingConfig signingConfigs.independent }
+    }
+}
+def nativeMoves = tasks.register('buildFileOpsNative', Exec) {
+    inputs.file('src/main/cpp/fileops.c')
+    inputs.file('src/main/cpp/discovery.cpp')
+    inputs.file('src/main/cpp/rootindex.c')
+    inputs.file('../scripts/build-native.py')
+    outputs.dir(layout.buildDirectory.dir('generated/jniLibs'))
+    commandLine 'python3', rootProject.file('scripts/build-native.py')
+}
+tasks.named('preBuild').configure { dependsOn(nativeMoves) }

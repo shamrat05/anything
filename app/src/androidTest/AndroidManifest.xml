@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <instrumentation android:name="dev.fastsearch.android.IndexProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.RootScannerProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.ProviderProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.DeviceSearchProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.PreviewProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.FileOperationProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.UiProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.LocationProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.PreviewUiProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.PermissionProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.UpdateProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.OperationUpdateProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.PerformanceProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.RenamePreviewProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.ThumbnailEfficiencyProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+</manifest>
