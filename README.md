@@ -2,9 +2,13 @@
 
 # Anything
 
-**Find Android files by name as you type.** Anything is a free, MIT-licensed file search and file manager by CallCraft Studio. It keeps the filename index on your phone and runs on Android 8.0 and newer.
+**Find anything fast with Anything.**
+
+Search Android filenames as you type. Anything is a free, MIT-licensed file search and file manager by CallCraft Studio. The index stays on your phone. Android 8.0 and newer.
 
 [Download build 2](https://github.com/shamrat05/anything/releases/tag/v1.0.0-build.2) · [User guide](GUIDE.md) · [Privacy](https://callcraftstudio.com/anything/privacy/) · [Support development](https://callcraftstudio.com/anything/support/)
+
+[![Support on Patreon](store/assets/support-on-patreon.svg)](https://www.patreon.com/cw/Shamrat05/membership)
 
 ## Download
 
@@ -24,6 +28,14 @@ Install one variant at a time. Open Anything, grant file access and let the firs
 - **Tidy files right from the results.** Copy, move, rename, share or delete files. For a batch rename, select files and review the proposed names before applying them.
 - **See what’s using space.** Open the storage map to find large files and folders. Use File Manager to browse one folder at a time, with recent folders and bookmarks.
 - **Find more from the same search box.** Search launchable apps and, with permission, contacts. The Full APK can also search SMS when you enable it and grant access.
+
+### Explore more
+
+- **Search with precision.** Combine file categories, select extensions, search within a folder, or use exclusions and regular expressions. Try `size:>10mb dm:today` to find larger files modified today.
+- **Browse the way you like.** Pinch to change the layout, jump through results with the scrollbar, or go back to a recent or bookmarked folder. Search shared storage and mounted SD cards without root, or opt into a separate root index on a rooted phone.
+- **Preview more formats.** Browse SVGs, Markdown, HTML and ZIP archives alongside PDFs, images, video and audio. Swipe through results or adjust playback speed in the built-in player.
+- **Clean up a batch at once.** Select or invert a group, then copy, move or rename it. Bulk Rename can replace text, add prefixes or suffixes, and number files with a preview before you apply the changes.
+- **Pick up where you left off.** The optional Last location setting restores your query, folder history and position. Light, dark and system themes are available, and you can hide dotfiles without rebuilding the index.
 
 ## See it in use
 
