@@ -25,7 +25,17 @@ Install one variant at a time. Open Anything, grant file access and let the firs
 - **See what’s using space.** Open the storage map to find large files and folders. Use File Manager to browse one folder at a time, with recent folders and bookmarks.
 - **Find more from the same search box.** Search launchable apps and, with permission, contacts. The Full APK can also search SMS when you enable it and grant access.
 
-<img src="store/assets/anything-build-2-pdf-preview.png" width="270" alt="Anything build 2 displaying a synthetic invoice in its built-in PDF preview">
+## See it in use
+
+These are build 2 screenshots from a demo folder with sample files. Select any image to see it at full size.
+
+| Search by name | Narrow by file type | Check a PDF | Preview a bulk rename |
+| --- | --- | --- | --- |
+| <a href="store/assets/anything-build-2-simple-search.png"><img src="store/assets/anything-build-2-simple-search.png" width="180" alt="Typing invoice brings up matching PDFs, an image and a text file"></a> | <a href="store/assets/anything-build-2-filtered-search.png"><img src="store/assets/anything-build-2-filtered-search.png" width="180" alt="The query invoice ext:pdf returns just the two PDFs"></a> | <a href="store/assets/anything-build-2-pdf-preview.png"><img src="store/assets/anything-build-2-pdf-preview.png" width="180" alt="The built-in PDF viewer opens a sample invoice"></a> | <a href="store/assets/anything-build-2-bulk-rename.png"><img src="store/assets/anything-build-2-bulk-rename.png" width="180" alt="Bulk rename previews the original and proposed names for two PDFs"></a> |
+
+| Browse in a grid | Scan filenames in a list | See what takes up space |
+| --- | --- | --- |
+| <a href="store/assets/anything-build-2-grid-browse.png"><img src="store/assets/anything-build-2-grid-browse.png" width="220" alt="Grid view shows PDFs, an image, text, a ZIP archive and audio"></a> | <a href="store/assets/anything-build-2-list-browse.png"><img src="store/assets/anything-build-2-list-browse.png" width="220" alt="List view shows filenames and sizes in the same demo folder"></a> | <a href="store/assets/anything-build-2-storage-map.png"><img src="store/assets/anything-build-2-storage-map.png" width="220" alt="Storage map compares file sizes in the same demo folder"></a> |
 
 More examples and syntax are in the [query guide](core/README.md). For search help or a bug report, open **More actions → Help** or see [app support](SUPPORT.md).
 
