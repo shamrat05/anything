@@ -8,6 +8,8 @@ Anything is an Android app provided by CallCraft Studio. Contact [shamrat@callcr
 
 The app stores a local index containing file names, paths, file or folder type, size and modified time. Searches read that index. Previews read only the file you open or the visible thumbnails. The index is not a copy of your file contents.
 
+The app can keep up to 64 results from the last file search in private storage so it can show them while the index opens. It replaces this saved page as new searches complete.
+
 The app can search launchable apps and, with your permission, contact names and phone numbers. Contact search results stay in memory and are not added to the file index. A recent app list can remain in memory for up to 30 seconds.
 
 Recent and saved search terms, display settings and a temporary file selection are stored in the app's private storage. Recent and saved searches each retain up to 50 entries. The file clipboard expires after 24 hours. Read-access records for opened or shared files expire after seven days. Search terms can contain personal information if you enter it.

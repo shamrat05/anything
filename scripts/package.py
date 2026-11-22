@@ -11,10 +11,10 @@ os.chdir(root)
 out = root / 'dist'
 out.mkdir(exist_ok=True)
 artifacts = {
-    'app/build/outputs/bundle/playRelease/app-play-release.aab': 'anything-play-1.0.0.aab',
-    'app/build/outputs/apk/play/release/app-play-release.apk': 'anything-play-1.0.0.apk',
-    'app/build/outputs/apk/full/release/app-full-release.apk': 'anything-android-1.0.0.apk',
-    'app/build/outputs/apk/full/debug/app-full-debug.apk': 'anything-android-1.0.0-debug.apk',
+    'app/build/outputs/bundle/playRelease/app-play-release.aab': 'anything-play-1.0.1.aab',
+    'app/build/outputs/apk/github/release/app-github-release.apk': 'anything-play-1.0.1.apk',
+    'app/build/outputs/apk/full/release/app-full-release.apk': 'anything-android-1.0.1.apk',
+    'app/build/outputs/apk/full/debug/app-full-debug.apk': 'anything-android-1.0.1-debug.apk',
     'app/build/outputs/apk/androidTest/full/debug/app-full-debug-androidTest.apk': 'anything-android-tests.apk',
 }
 for source, name in artifacts.items():

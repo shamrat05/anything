@@ -6,7 +6,7 @@
 
 Search Android filenames as you type. Anything is a free, MIT-licensed file search and file manager by CallCraft Studio. The index stays on your phone. Android 8.0 and newer.
 
-[Download build 2](https://github.com/shamrat05/anything/releases/tag/v1.0.0-build.2) · [User guide](GUIDE.md) · [Privacy](https://callcraftstudio.com/anything/privacy/) · [Support development](https://callcraftstudio.com/anything/support/)
+[Download the latest release](https://github.com/shamrat05/anything/releases/latest) · [User guide](GUIDE.md) · [Privacy](https://callcraftstudio.com/anything/privacy/) · [Support development](https://callcraftstudio.com/anything/support/)
 
 [![Support on Patreon](store/assets/support-on-patreon.svg)](https://www.patreon.com/cw/Shamrat05/membership) [![Support with USDT](store/assets/support-with-usdt.svg)](https://callcraftstudio.com/anything/support/#usdt-tron)
 
@@ -14,10 +14,10 @@ Search Android filenames as you type. Anything is a free, MIT-licensed file sear
 
 | Signed APK | Choose it if |
 | --- | --- |
-| [Full APK](https://github.com/shamrat05/anything/releases/download/v1.0.0-build.2/anything-android-1.0.0.apk) | You want the direct-download build, including optional SMS search. |
-| [Play-variant APK](https://github.com/shamrat05/anything/releases/download/v1.0.0-build.2/anything-play-1.0.0.apk) | You want to sideload the build that omits SMS access and search. |
+| [SMS-free APK](https://github.com/shamrat05/anything/releases/latest/download/anything-play.apk) | You want file search and management without SMS access. |
+| [Full APK](https://github.com/shamrat05/anything/releases/latest/download/anything-with-sms.apk) | You also want the option to search SMS. |
 
-[SHA-256 checksums](https://github.com/shamrat05/anything/releases/download/v1.0.0-build.2/SHA256SUMS-release.txt) · Version 1.0.0, build 2
+[SHA-256 checksums](https://github.com/shamrat05/anything/releases/latest/download/SHA256SUMS-release.txt)
 
 Install one variant at a time. Open Anything, grant file access and let the first index finish. Later launches reuse the saved index and check for changes in the background. Shared-storage search works without root. For protected folders, select the root index scope on a rooted device and grant root access.
 
@@ -63,7 +63,11 @@ The APK is written to `app/build/outputs/apk/full/debug/app-full-debug.apk`. Use
 
 ## Support development
 
-If Anything saves you time, you can [support its development on Patreon](https://www.patreon.com/cw/Shamrat05/membership) with an optional $3, $10 or $15 monthly contribution. It helps fund maintenance, bug fixes and testing across Android devices. Everyone gets the same app features. See the [Anything support page](https://callcraftstudio.com/anything/support/) for funding and app support links.
+A PDF lands in Downloads. Weeks later all you remember is the word `invoice`. Anything is for that moment. If it saves you time, you can help fund maintenance, bug fixes, and testing on real Android phones. Every feature stays free.
+
+[![Support on Patreon](store/assets/support-on-patreon.svg)](https://www.patreon.com/cw/Shamrat05/membership) [![Support with USDT](store/assets/support-with-usdt.svg)](https://callcraftstudio.com/anything/support/#usdt-tron)
+
+Patreon offers optional $3, $10 and $15 monthly contributions. You can also make a one-time contribution with USDT. In either GitHub APK, open **More actions → Support development**. For help with the app, see [Support](SUPPORT.md).
 
 ### USDT on Tron (TRC20)
 
@@ -72,8 +76,6 @@ Send **USDT on Tron (TRC20)** only. The minimum deposit is **more than 0.01 USDT
 ```
 TCURP3QhbasypbXJkb1ggTzQBYruYsuibv
 ```
-
-[![Support on Patreon](store/assets/support-on-patreon.svg)](https://www.patreon.com/cw/Shamrat05/membership) [![Support with USDT](store/assets/support-with-usdt.svg)](https://callcraftstudio.com/anything/support/#usdt-tron)
 
 <img src="store/assets/anything-usdt-tron-qr.svg" width="216" height="216" alt="QR code for the USDT on Tron (TRC20) receiving address">
 

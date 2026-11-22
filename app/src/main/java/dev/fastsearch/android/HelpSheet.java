@@ -7,6 +7,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.text.InputFilter;
@@ -21,11 +22,13 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-/** User-initiated reporting; no root prompt, system bugreport, logcat or network permission. */
+/** Search help, updates and user-initiated reporting. */
 final class HelpSheet {
     private static final String EMAIL = "shamrat@callcraftstudio.com";
     private static final String FORM = "https://callcraftstudio.com/contact/";
     private static final String SUBJECT = "Anything bug report";
+    private static final String RELEASES = "https://github.com/shamrat05/anything/releases/latest";
+    private static final String PLAY_STORE = "com.android.vending";
     private final Activity activity;
     private final FileIndex index;
     private final AppSheet sheet;
@@ -84,15 +87,44 @@ final class HelpSheet {
             paragraph("Spaces combine terms. Use | for alternatives, ! to exclude, < > to group, and quotes for phrases. * and ? match wildcards.", false);
             paragraph("Tap a folder to search inside it. Use the file-type and extension filters to narrow the results.", false);
         } else if (page == 1) {
+            paragraph("Getting new updates", true);
+            paragraph("Installed version " + BuildConfig.VERSION_NAME + " (build " + BuildConfig.VERSION_CODE + ").", false);
+            boolean fromPlay = PLAY_STORE.equals(installerPackage());
+            paragraph(fromPlay ? "Open Google Play to check for an update."
+                    : "For a GitHub installation, open the latest release and choose the APK you already use. The Android installer will guide you through the update. If you installed from a store, check that store for updates.", false);
+            action("Check for updates", () -> openWeb(fromPlay
+                    ? "https://play.google.com/store/apps/details?id=" + activity.getPackageName() : RELEASES));
             paragraph("Files missing?", true);
             paragraph("Check File access under Storage, confirm the active folder and file type, then use Refresh. The first index may take time. You can see its progress under Index statistics.", false);
             paragraph("Using root storage?", true);
             paragraph("Root indexing requires a grant from your installed root manager. Open Storage → Index scope to confirm the selected mode, and Refresh to check protected folders. Help does not request root.", false);
-            paragraph("If the issue persists, note what you expected and try to reproduce it with sample files before opening Report a bug.", false);
+            paragraph("To quiet repeated grant notifications in Magisk, open Superuser → Anything and turn off Notifications. Leave Logs enabled.", false);
+            Runnable funding = FundingSupport.action(activity);
+            if (funding != null) action("Support development", funding);
+            action("Get support", () -> select(2));
         } else {
             showReport();
         }
         scroll.scrollTo(0, 0);
+    }
+
+    private String installerPackage() {
+        PackageManager packages = activity.getPackageManager();
+        String name = activity.getPackageName();
+        if (Build.VERSION.SDK_INT < 30) return packages.getInstallerPackageName(name);
+        try {
+            return packages.getInstallSourceInfo(name).getInstallingPackageName();
+        } catch (PackageManager.NameNotFoundException unavailable) {
+            return null;
+        }
+    }
+
+    private void openWeb(String url) {
+        try {
+            activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (ActivityNotFoundException unavailable) {
+            Toast.makeText(activity, "No app found to open the update page.", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void paragraph(String message, boolean heading) {

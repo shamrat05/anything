@@ -51,7 +51,7 @@ For a desktop build, use x86-64 Linux or WSL with JDK 17, Python 3, Bash, Androi
 ```sh
 python3 scripts/setup-signing.py
 scripts/check.sh
-scripts/build.sh :app:assembleFullDebug :app:assembleFullRelease :app:assemblePlayRelease :app:bundlePlayRelease :app:assembleFullDebugAndroidTest :app:lintFullDebug :app:lintPlayRelease --console=plain
+scripts/build.sh :app:assembleFullDebug :app:assembleFullRelease :app:assembleGithubRelease :app:bundlePlayRelease :app:assembleFullDebugAndroidTest :app:lintFullDebug :app:lintGithubRelease :app:lintPlayRelease --console=plain
 ```
 
 Signing material lives outside Git under `~/.local/share/anything-android/`; `release-signing.properties` is ignored. Back up the key privately. GitHub Actions builds four native ABIs with 16 KiB ELF alignment. Without a configured `FASTSEARCH_SIGNING_BUNDLE`, the runner generates a temporary signing key. Such artifacts are for testing, not updates to existing installations. Use the same release signing key for updates. Local Termux builds use installed `aapt2` and a local compiler.
@@ -80,7 +80,7 @@ RootScannerProbe additionally exercises the packaged initial native scanner, met
 
 Every invocation must report both `INSTRUMENTATION_RESULT: passed=true` and `INSTRUMENTATION_CODE: -1`. Shell exit status alone is insufficient.
 
-After committing the checked source, `python3 scripts/package.py` archives `HEAD`, validates distributions and writes checksums under `dist/`. Outputs include Full and Play APKs, the Play AAB, test APK, source ZIP, store assets and reports. Updates must retain the same signing certificate and data.
+After committing the checked source, `python3 scripts/package.py` archives `HEAD`, validates distributions and writes checksums under `dist/`. Outputs include the Full and SMS-free GitHub APKs, the Play AAB, test APK, source ZIP, store assets and reports. The GitHub APKs offer in-app funding links. Use the Play AAB for store distribution. Updates must retain the same signing certificate and data.
 
 ## Support and submission
 

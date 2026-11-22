@@ -30,6 +30,7 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -134,8 +135,10 @@ public final class FileIndex {
     private final AtomicBoolean catchUpQueued = new AtomicBoolean();
     private final Object catchUpLock = new Object();
     private boolean automaticCatchUpRunning, resumeAutomaticCatchUp;
+    private boolean initialObserversPending, initialCatchUpDeferred;
     private volatile boolean interruptAutomaticCatchUp;
     private int pendingPathUpdates;
+    private volatile int pendingOperationUpdates;
     private List<String> foregroundPaths = Collections.emptyList();
     private long[] foregroundStamps = new long[0];
     private final AtomicBoolean discoveryQueued = new AtomicBoolean();
@@ -402,6 +405,10 @@ public final class FileIndex {
             cancelRequested.set(false);
             ensureLoaded();
             if(lastScanMillis==0)return;
+            if (!requested && initialObserversPending) {
+                initialCatchUpDeferred = true;
+                return;
+            }
             synchronized(catchUpLock){
                 if(pendingPathUpdates>0){resumeAutomaticCatchUp=true;return;}
                 automaticCatchUpRunning=true;
@@ -452,7 +459,9 @@ public final class FileIndex {
         synchronized(catchUpLock){
         pendingPathUpdates++;
         try{worker.execute(()->{try{
-            if(scanQueued.get())return;ensureLoaded();
+            if(scanQueued.get())return;
+            checkDiscovery(scopeVersion.get());
+            ensureLoaded();
             if(lastScanMillis==0||!sharedAccess())return;
             long now=SystemClock.elapsedRealtime();if(now-lastDiscoveryElapsed<500)return;
             lastDiscoveryElapsed=now;int version=scopeVersion.get();
@@ -465,35 +474,50 @@ public final class FileIndex {
             long[] stamps=NativeDiscovery.modified(physical);ScanData additions=new ScanData();
             Map<String,Set<String>> listings=new HashMap<>();List<String> removed=new ArrayList<>();
             for(int i=0;i<logical.size();i++){
-                checkWork(version,false);if(stamps[i]<0)continue;
+                checkDiscovery(version);if(stamps[i]<0)continue;
                 String path=logical.get(i);FileEntry old=entries.get(path);
                 if(old!=null&&old.directory&&old.modified==stamps[i])continue;
                 File directory=new File(physical.get(i));ensureObserver(path);
                 File[] children=directory.listFiles();if(children==null)continue;
                 Set<String> seen=new HashSet<>();listings.put(path,seen);
                 // Only new subtrees are walked. Existing descendants are never recursively revisited.
-                for(File child:children){checkWork(version,false);seen.add(indexPath(child.getAbsolutePath()));FileEntry fresh=indexedMetadata(child);if(fresh==null)continue;
+                for(File child:children){checkDiscovery(version);seen.add(indexPath(child.getAbsolutePath()));FileEntry fresh=indexedMetadata(child);if(fresh==null)continue;
                     FileEntry previous=entries.get(fresh.path());
                     if(previous!=null&&previous.directory!=fresh.directory)removed.add(fresh.path());
-                    if(fresh.directory&&(previous==null||!previous.directory))walk(child,additions,version,false);
+                    if(fresh.directory&&(previous==null||!previous.directory))walk(child, additions, false, () -> checkDiscovery(version));
                     else if(!fresh.directory&&(previous==null||previous.directory||previous.modified!=fresh.modified||previous.size!=fresh.size))additions.entries.put(fresh);
                     // Keep existing child-directory stamps until their own listing completes.
                 }
                 additions.entries.put(new FileEntry(path,true,0,stamps[i]));additions.readable.add(path);
             }
-            if(!listings.isEmpty())for(FileEntry entry:snapshot){Set<String> seen=listings.get(entry.parent);
+            if(!listings.isEmpty())for(FileEntry entry:snapshot){checkDiscovery(version);Set<String> seen=listings.get(entry.parent);
                 if(seen!=null&&!seen.contains(entry.path()))removed.add(entry.path());}
+            checkDiscovery(version);
             if(!additions.entries.isEmpty()||!removed.isEmpty()){
                 persistDelta(removed,additions,version);for(String path:removed)removeTree(path);entries.putAll(additions.entries);
                 readableDirectories.addAll(additions.readable);snapshot=mergeSnapshot(snapshot,removed,additions.entries);
                 syncObservers();publishStable("");
             }
-        }catch(CancellationException ignored){}catch(RuntimeException|OutOfMemoryError failed){reconcileNeeded=true;}
-        finally{discoveryQueued.set(false);finishPathUpdate(true);}});
+        } catch (CancellationException stopped) {
+            synchronized (catchUpLock) {
+                if (!closed && pendingOperationUpdates > 0) {
+                    reconcileNeeded = true;
+                    lastReconcileElapsed = 0;
+                    resumeAutomaticCatchUp = true;
+                }
+            }
+        } catch (RuntimeException | OutOfMemoryError failed) {
+            reconcileNeeded = true;
+        } finally { discoveryQueued.set(false); finishPathUpdate(true); }});
         interruptCatchUpForPathUpdate();
         }catch(RejectedExecutionException stopped){discoveryQueued.set(false);pendingPathUpdates--;return false;}
         }
         return true;
+    }
+
+    private void checkDiscovery(int version) {
+        checkWork(version, false);
+        if (pendingOperationUpdates > 0) throw new CancellationException("File operation update is waiting.");
     }
 
     /** Watch the accessible storage alias while retaining the root index's canonical keys. */
@@ -519,6 +543,7 @@ public final class FileIndex {
         if(closed){done.completeExceptionally(new IOException("Index is closed."));return done;}
         synchronized(catchUpLock){
         pendingPathUpdates++;
+        pendingOperationUpdates++;
         try{worker.execute(()->{try{ensureLoaded();List<String> chosen=new ArrayList<>();
             if(requested.size()>FileClipboard.MAX_ITEMS*2)throw new IOException("Too many changed paths.");
             for (String path : requested) {
@@ -533,9 +558,9 @@ public final class FileIndex {
             if(result==null)throw new IOException(state.error.isEmpty()?"Changed-file update stopped.":state.error);
             done.complete(result);
         }catch(Exception|OutOfMemoryError failure){done.completeExceptionally(failure);}
-        finally{finishPathUpdate(false);}});
+        finally{synchronized(catchUpLock){pendingOperationUpdates--;}finishPathUpdate(false);}});
         interruptCatchUpForPathUpdate();}
-        catch(RejectedExecutionException stopped){pendingPathUpdates--;done.completeExceptionally(stopped);}
+        catch(RejectedExecutionException stopped){pendingPathUpdates--;pendingOperationUpdates--;done.completeExceptionally(stopped);}
         }
         return done;
     }
@@ -699,6 +724,8 @@ public final class FileIndex {
         scanWarning = "";
         scannedThisProcess = false;
         reconcileNeeded = false;
+        initialObserversPending = false;
+        initialCatchUpDeferred = false;
         loaded = false;
         publish(false, 0, 0, 0, "Loading saved filenames…", "");
         try {
@@ -713,12 +740,11 @@ public final class FileIndex {
             scanDurationMillis = readLong(db, "duration");
             rootAccessErrors = (int) readLong(db, "root_access_errors");
             rootExcludedPaths = (int) readLong(db, "root_excluded");
-            snapshot = sorted(entries);
+            snapshot = sortedCache(entries);
             loaded = true;
-            // Publish cache before requesting potentially thousands of directory watches.
             publishStable("");
-            syncObservers();
-            publishStable("");
+            // Give foreground work the first turn after publishing the saved snapshot.
+            scheduleInitialObservers(scopeVersion.get());
         } catch (RuntimeException | OutOfMemoryError failure) {
             entries.clear();
             readableDirectories.clear();
@@ -727,6 +753,35 @@ public final class FileIndex {
             loaded = true;
             SupportLog.record(SupportLog.Event.CACHE_LOAD_FAILED, Boolean.TRUE.equals(activeRootMode), 0, 0);
             publishStable("Saved index could not be loaded. Refresh to rebuild. " + failureMessage(failure));
+        }
+    }
+
+    private void scheduleInitialObservers(int version) {
+        if (!probeLiveWatching || closed) return;
+        initialObserversPending = true;
+        try {
+            worker.schedule(() -> {
+                if (closed || version != scopeVersion.get()) return;
+                if (pendingOperationUpdates > 0) {
+                    scheduleInitialObservers(version);
+                    return;
+                }
+                State current = state;
+                boolean stable = current.status.equals(stableStatus());
+                try {
+                    syncObservers();
+                    publish(current.scanning, current.scannedDirectories, current.deniedDirectories,
+                            current.totalDirectories, stable ? stableStatus() : current.status, current.error);
+                } finally {
+                    initialObserversPending = false;
+                    if (initialCatchUpDeferred) {
+                        initialCatchUpDeferred = false;
+                        checkChanges();
+                    }
+                }
+            }, 500, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException stopped) {
+            initialObserversPending = false;
         }
     }
 
@@ -848,10 +903,14 @@ public final class FileIndex {
     }
 
     private void walk(File root, ScanData found, int version, boolean cancellable) {
+        walk(root, found, cancellable, () -> checkWork(version, cancellable));
+    }
+
+    private void walk(File root, ScanData found, boolean cancellable, Runnable check) {
         ArrayDeque<File> pending = new ArrayDeque<>();
         pending.add(root);
         while (!pending.isEmpty()) {
-            checkWork(version, cancellable);
+            check.run();
             File directory = pending.removeFirst();
             FileEntry directoryEntry = indexedMetadata(directory);
             if (directoryEntry == null) {
@@ -870,7 +929,7 @@ public final class FileIndex {
             }
             found.readable.add(directoryEntry.path());
             for (File child : children) {
-                checkWork(version, cancellable);
+                check.run();
                 FileEntry entry = indexedMetadata(child);
                 if (entry == null) continue;
                 found.entries.put(entry);
@@ -1154,6 +1213,16 @@ public final class FileIndex {
         List<FileEntry> result = new ArrayList<>(values.values());
         result.sort(ORDER);
         return Collections.unmodifiableList(result);
+    }
+
+    private static List<FileEntry> sortedCache(FileEntryTable entries) {
+        Runtime memory = Runtime.getRuntime();
+        long available = memory.maxMemory() - memory.totalMemory() + memory.freeMemory();
+        if (entries.size() < 65_536 || available < 24L * entries.size()
+                || memory.availableProcessors() < 4) return sorted(entries);
+        FileEntry[] ordered = entries.values().toArray(new FileEntry[0]);
+        Arrays.parallelSort(ordered, ORDER);
+        return Collections.unmodifiableList(Arrays.asList(ordered));
     }
 
     /** Keep existing order and sort only the delta; published snapshots remain immutable. */

@@ -150,8 +150,14 @@ public final class FileOperationWorker {
             try(Pinned source=Pinned.absolute(path,item.getBoolean("directory"))){verify(item,source.stat);protectSource(path,source.stat,true);
                 if(!identities.add(source.stat.st_dev+":"+source.stat.st_ino))throw new IOException("The selection contains duplicate filesystem items.");}}
         for(int i=0;i<entries.length();i++){control.check(true);JSONObject item=entries.getJSONObject(i);String path=requirePath(item.getString("path"));
-            try(Pinned source=Pinned.absolute(path,item.getBoolean("directory"));Pinned parent=Pinned.absolute(parent(path),true)){
-                verify(item,source.stat);protectSource(path,source.stat,true);deleteNode(parent,basename(path),source.stat,source.stat.st_dev,0);}
+            try (Pinned parent = Pinned.absolute(parent(path), true)) {
+                String name = basename(path);
+                try (Pinned source = Pinned.raw(parent.proc() + "/" + name, item.getBoolean("directory"))) {
+                    verify(item, source.stat);
+                    protectSource(path, source.stat, true);
+                    deleteNode(parent, name, source.stat, source.stat.st_dev, 0);
+                }
+            }
             completed.put(i);emit(new JSONObject().put("event","progress").put("completed",completed.length()).put("total",entries.length()).put("completedIndices",completed));}
     }
 
