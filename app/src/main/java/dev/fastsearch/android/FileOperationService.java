@@ -180,7 +180,9 @@ public final class FileOperationService extends Service {
                 }
                 committed = result.optJSONArray("completedIndices");
                 if (committed == null) committed = progressIndices[0];
-                changed |= result.optBoolean("changed");
+                // A completed delete response distinguishes no changes from a partial deletion.
+                // If the helper fails before responding, still reconcile conservatively.
+                if (deleting) changed = result.optBoolean("changed", true);
                 int done = committed.length();
                 boolean stopped = result.optBoolean("cancelled") || CANCEL_REQUESTED.get();
                 String status = result.optBoolean("ok") ? (deleting?"Deleted ":renaming!=null?"Renamed ":move ? "Moved " : "Copied ") + done + " items"

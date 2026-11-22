@@ -110,6 +110,8 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private boolean mixedDeviceSearch;
     private boolean descending,initialRequested,waitingPermission,searchRunning,showHidden,reportedFullyDrawn;
     private boolean matchCase,wholeWord,matchPath,regex,selectionMode,allSelected;
+    private String provisionalSearchKey;
+    private Runnable saveSearchRows;
     private long totalFileMatches,lastSearchMillis;
     // Accessed only by the search worker. Keep one full Root view for repeat location switches.
     private RootSearchResult rootSearchResult;
@@ -680,6 +682,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         storage.add("File access");storage.add("Index statistics");
         SubMenu appearance=m.addSubMenu("Appearance");appearance.add("Theme");appearance.add("Show status").setCheckable(true).setChecked(prefs.getBoolean("showStatus",true));appearance.add("Touch feedback").setCheckable(true).setChecked(prefs.getBoolean("haptics",true));
         m.add("Help");
+        if (FundingSupport.action(this) != null) m.add("Support development");
         showMenu(anchor,m,"More actions",this::action);}
     private void showMenu(View anchor,Menu model,String title,java.util.function.Consumer<String> action){
         if(navigationMenu!=null)navigationMenu.dismiss();
@@ -693,7 +696,11 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         case "Recent searches":chooseQuery("Recent searches","history");break;
         case "Save search":String q=query.getText().toString().trim();if(q.isEmpty())toast("Enter a search");else{addQuery("bookmarks",q);toast("Search saved");}break;
         case "Saved searches":chooseQuery("Saved searches","bookmarks");break;
-        case "Export results":if(isDeviceCategory(category.getSelectedItemPosition())){toast("Choose a file category");break;}Intent create=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("text/csv").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"file-search.csv");try{startActivityForResult(create,20);}catch(Exception e){toast("No document picker available");}break;
+        case "Export results":
+            if(provisionalSearchKey!=null){toast("Wait for the index before exporting");break;}
+            if(isDeviceCategory(category.getSelectedItemPosition())){toast("Choose a file category");break;}
+            Intent create=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("text/csv").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"file-search.csv");
+            try{startActivityForResult(create,20);}catch(Exception e){toast("No document picker available");}break;
         case "Index statistics":stats();break;case "File types":chooseTypes();break;
         case "File access":waitingPermission=true;openFileSettings();break;
         case "Touch feedback":prefs.edit().putBoolean("haptics",!prefs.getBoolean("haptics",true)).apply();break;
@@ -706,6 +713,10 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             AppSheet help=new HelpSheet(this,index).dialog();activeSheet=help;
             help.setOnDismissListener(d->{if(activeSheet==help)activeSheet=null;});
             help.show();break;
+        case "Support development":
+            Runnable funding = FundingSupport.action(this);
+            if (funding != null) funding.run();
+            break;
     }}
     private void updateSearchControls(){
         boolean scoped=folderScope!=null&&!isDeviceCategory(category.getSelectedItemPosition()),hasQuery=query.length()>0;
@@ -843,6 +854,15 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         boolean reverse=descending,includeHidden=showHidden;
         String input=map?"":query.getText().toString(),scope=map?mapScope():isDeviceCategory(kind)?null:folderScope,extension=map?null:subtype;
         SearchQuery.Options opts=options();List<FileEntry> entries=state.entries;
+        boolean fileSearch = !manager && !map && kind < 9;
+        String searchKey = fileSearch ? new JSONArray().put(index.isRootEnabled()).put(kind).put(types)
+                .put(field).put(reverse).put(includeHidden).put(input).put(scope).put(extension)
+                .put(opts.matchCase).put(opts.wholeWord).put(opts.matchPath).put(opts.regex).toString() : null;
+        if (saveSearchRows != null) ui.removeCallbacks(saveSearchRows);
+        if (provisionalSearchKey != null && !Objects.equals(provisionalSearchKey, searchKey)) {
+            clearResultRows();
+            adapter.notifyDataSetChanged();
+        }
         if(map&&!Objects.equals(mapRowsScope,scope)&&!adapter.items.isEmpty()){
             clearResultRows();adapter.notifyDataSetChanged();
         }
@@ -851,6 +871,21 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         subtypeButton.setContentDescription(subtype==null?"File extensions":"File extension: "+(subtype.isEmpty()?"No extension":subtype));
         updateSearchControls();
         if(pending!=null)pending.cancel(true);searches.purge();if(deviceCancellation!=null)deviceCancellation.cancel();
+        if (fileSearch && !state.loaded && !selectionMode) {
+            searchRunning = false;
+            if (provisionalSearchKey == null && (index.isRootEnabled() || FileIndex.hasAccess(this))) {
+                List<FileEntry> saved = SavedSearchRows.read(prefs, searchKey);
+                if (!saved.isEmpty()) {
+                    provisionalSearchKey = searchKey;
+                    adapter.items = saved;
+                    adapter.sections = FileSections.build(saved, field);
+                    adapter.notifyDataSetChanged();
+                }
+            }
+            status.setText(provisionalSearchKey == null ? "Loading index…" : "Saved results · loading index…");
+            updateEmpty();
+            return;
+        }
         final CancellationSignal cancellation=new CancellationSignal();deviceCancellation=cancellation;searchRunning=true;refreshResults=refreshViewport;
         List<FileEntry> previousRows=adapter.items;
         if(map)status.setText(mapTotalBytes>0?size(mapTotalBytes)+" • Checking storage…":"Checking storage…");
@@ -929,8 +964,9 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
                     Bundle visible=browseLocation();
                     if(selectionMode||visible.getInt("position")!=0||visible.getInt("top")<0)restore=visible;
                 }
-                boolean changed=!sameRows||adapter.devices!=deviceResults
+                boolean changed=provisionalSearchKey!=null||!sameRows||adapter.devices!=deviceResults
                         ||(map&&tiles.stream().anyMatch(tile->!Objects.equals(mapSizes.get(tile.entry.path()),tile.bytes)));
+                provisionalSearchKey = null;
                 if(changed)retainSelection(found);
                 adapter.items=found;adapter.devices=deviceResults;adapter.sections=sections;
                 if(changed){
@@ -956,6 +992,11 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
                 if(map)status.setText(size(tiles.stream().mapToLong(tile->tile.bytes).sum())+" • "+format(matches)+" items");
                 else if(manager||!state.scanning)status.setText(resultCount(matches+deviceResults.size(),deviceNext!=null));
                 updateSelection();updateEmpty();
+                if (fileSearch && state.loaded && state.entries == entries && state.error.isEmpty()) {
+                    List<FileEntry> page = new ArrayList<>(found.subList(0, Math.min(found.size(), SavedSearchRows.MAX_ROWS)));
+                    saveSearchRows = () -> SavedSearchRows.write(prefs, searchKey, page);
+                    ui.postDelayed(saveSearchRows, 500);
+                }
                 if(!reportedFullyDrawn&&(state.loaded||kind>=9)){reportedFullyDrawn=true;reportFullyDrawn();}
                 if(!manager&&!map&&kind<9&&state.entries!=entries)runSearch(true);});
         }catch(android.os.OperationCanceledException|java.util.concurrent.CancellationException ignored){}catch(Exception failure){ui.post(()->{if(sequence.get()!=ticket||isDestroyed())return;searchRunning=false;
@@ -963,6 +1004,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             showError(failure.getMessage());status.setText(manager||map?"Folder unavailable":"Search unavailable");updateEmpty();});}});
         }catch(RejectedExecutionException busy){searchRunning=false;}}
     private void clearResultRows(){
+        provisionalSearchKey = null;
         adapter.items=Collections.emptyList();adapter.devices=Collections.emptyList();
         adapter.sections=FileSections.EMPTY;totalFileMatches=0;
         mapView.clear();
@@ -1162,7 +1204,9 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         return super.dispatchTouchEvent(event);
     }
 
-    private void beginSelection(FileEntry entry,View source){if(longPressConsumed)return;longPressConsumed=true;enterSelection();
+    private void beginSelection(FileEntry entry,View source){if(longPressConsumed)return;
+        if(provisionalSearchKey!=null){toast("Wait for the index before selecting files");return;}
+        longPressConsumed=true;enterSelection();
         if(!isSelected(entry)){if(allSelected)selection.remove(entry.path());else selection.add(entry.path());}selected=entry;haptic(source);updateSelection();adapter.notifyDataSetChanged();}
     private void enterSelection(){selectionMode=true;query.dismissDropDown();query.clearFocus();
         getSystemService(android.view.inputmethod.InputMethodManager.class).hideSoftInputFromWindow(query.getWindowToken(),0);
@@ -1258,7 +1302,10 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         });
         sheet.show();
     }
-    private void onOperationChanged(FileOperationService.State operation){if(isDestroyed())return;if(operation.running){status.setText(operation.status);if(operation.completed>0&&operation.completed==operation.total)updateClipboard();}else{updateClipboard();if(operation.error!=null&&!operation.error.isEmpty())showError(operation.error);
+    private void onOperationChanged(FileOperationService.State operation){if(isDestroyed())return;if(operation.running){
+        if(saveSearchRows!=null)ui.removeCallbacks(saveSearchRows);
+        SavedSearchRows.clear(prefs);
+        status.setText(operation.status);if(operation.completed>0&&operation.completed==operation.total)updateClipboard();}else{updateClipboard();if(operation.error!=null&&!operation.error.isEmpty())showError(operation.error);
         else if(isFolderView()&&!searchRunning)updateFiles();}}
     private interface FileAction {void run()throws Exception;}
     private void submitFileAction(FileAction action){try{fileActions.execute(()->{try{action.run();}catch(Exception failure){ui.post(()->{if(!isDestroyed())showError(failure.getMessage());});}});}catch(RejectedExecutionException busy){toast("File access is busy");}}

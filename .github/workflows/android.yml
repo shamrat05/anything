@@ -36,7 +36,7 @@ jobs:
           mkdir -p dist
           scripts/check.sh | tee dist/HOST-CHECKS.txt
       - name: Build APKs and run lint
-        run: scripts/build.sh :app:assembleFullDebug :app:assembleFullRelease :app:assemblePlayRelease :app:bundlePlayRelease :app:assembleFullDebugAndroidTest :app:lintFullDebug :app:lintPlayRelease --console=plain
+        run: scripts/build.sh :app:assembleFullDebug :app:assembleFullRelease :app:assembleGithubRelease :app:bundlePlayRelease :app:assembleFullDebugAndroidTest :app:lintFullDebug :app:lintGithubRelease :app:lintPlayRelease --console=plain
       - name: Package APKs, source and checksums
         run: python3 scripts/package.py
       - uses: actions/upload-artifact@v4

@@ -26,7 +26,7 @@ The app processes searches on your device. No account, advertising or analytics.
 
 ## Upload files
 
-- `anything-play-1.0.0.aab`: signed Play bundle, with no SMS permission or category.
+- `anything-play-1.0.1.aab`: signed Play bundle, with no SMS permission or category.
 - `assets/icon-512.png`: original 512 × 512 app icon.
 - Capture screenshots from the Anything release using sample files. Prepare a 1024 × 500 feature graphic for the listing.
 
