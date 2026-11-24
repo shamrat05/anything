@@ -12,10 +12,10 @@ Search Android filenames as you type. Anything is a free, MIT-licensed file sear
 
 ## Download
 
-| Signed APK | Choose it if |
+| Download | What you get |
 | --- | --- |
-| [SMS-free APK](https://github.com/shamrat05/anything/releases/latest/download/anything-play.apk) | You want file search and management without SMS access. |
-| [Full APK](https://github.com/shamrat05/anything/releases/latest/download/anything-with-sms.apk) | You also want the option to search SMS. |
+| [Anything for Android (recommended)](https://github.com/shamrat05/anything/releases/latest/download/anything-play.apk) | File search and management. |
+| [Anything with SMS search](https://github.com/shamrat05/anything/releases/latest/download/anything-with-sms.apk) | The same app, plus optional text message search. |
 
 [SHA-256 checksums](https://github.com/shamrat05/anything/releases/latest/download/SHA256SUMS-release.txt)
 

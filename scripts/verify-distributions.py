@@ -78,7 +78,7 @@ def native_layout(archive, prefix):
 
 signatures = {}
 certificate = None
-for name in ['anything-android-1.0.1.apk', 'anything-play-1.0.1.apk',
+for name in ['anything-with-sms.apk', 'anything.apk',
              'anything-android-1.0.1-debug.apk', 'anything-android-tests.apk']:
     report = run([sdk_tool('apksigner'), 'verify', '--verbose', '--print-certs', out / name])
     (out / (name + '.signature.txt')).write_text(report)
@@ -95,7 +95,7 @@ permissions = {}
 versions = {}
 funding_assets = {'support-on-patreon.svg', 'anything-usdt-tron-qr.svg'}
 expected_identity = ('com.callcraftstudio.anything', release_version_code(), '1.0.1')
-for name, sms in [('anything-android-1.0.1.apk', True), ('anything-play-1.0.1.apk', False)]:
+for name, sms in [('anything-with-sms.apk', True), ('anything.apk', False)]:
     badging = run([sdk_tool('aapt2'), 'dump', 'badging', out / name])
     identity = re.search(r"package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", badging)
     if not identity or identity.groups() != expected_identity:
@@ -130,7 +130,7 @@ bundle_identity = (parsed.get('package'), parsed.get(android + 'versionCode'), p
 if bundle_identity != expected_identity:
     raise SystemExit(f'Wrong Play bundle package/version: expected {expected_identity}, got {bundle_identity}')
 aab_permissions = {item.get(android + 'name') for item in parsed.findall('uses-permission')}
-if aab_permissions != set(permissions['anything-play-1.0.1.apk']):
+if aab_permissions != set(permissions['anything.apk']):
     raise SystemExit('Play bundle and APK permission sets differ.')
 if parsed.find('uses-sdk').get(android + 'targetSdkVersion') != '36':
     raise SystemExit('Play bundle must target API 36.')
@@ -144,7 +144,7 @@ if not match or match.group(1).replace(':', '').lower() != certificate:
     raise SystemExit('Play bundle signing certificate differs from the APKs.')
 
 native = {}
-for name in ['anything-android-1.0.1.apk', 'anything-play-1.0.1.apk']:
+for name in ['anything-with-sms.apk', 'anything.apk']:
     native[name] = native_layout(out / name, 'lib')
 native[aab.name] = native_layout(aab, 'base/lib')
 (out / 'DISTRIBUTION-CHECKS.json').write_text(json.dumps({

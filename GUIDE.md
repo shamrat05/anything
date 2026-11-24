@@ -4,7 +4,7 @@ Local filename search for Android 8.0 and later. Anything saves separate shared-
 
 ## Use
 
-Choose the Full APK for optional SMS search, or the Play APK without SMS. If both APKs use the same package ID, only one can be installed at a time. Updating an existing installation requires the same signing certificate.
+Choose Anything for Android for file search and management. Choose Anything with SMS search only if you want optional text message search. Install one APK at a time, and use the same variant and signing certificate for updates.
 
 A fresh install explains File access, then opens Android's storage permission screen when requested. Contacts and SMS ask separately when their category is used. Notifications are optional. App search requires no private-data permission. Root folders require a rooted phone and a separate root grant. Shared storage permission does not expose other apps' private files.
 
@@ -80,7 +80,9 @@ RootScannerProbe additionally exercises the packaged initial native scanner, met
 
 Every invocation must report both `INSTRUMENTATION_RESULT: passed=true` and `INSTRUMENTATION_CODE: -1`. Shell exit status alone is insufficient.
 
-After committing the checked source, `python3 scripts/package.py` archives `HEAD`, validates distributions and writes checksums under `dist/`. Outputs include the Full and SMS-free GitHub APKs, the Play AAB, test APK, source ZIP, store assets and reports. The GitHub APKs offer in-app funding links. Use the Play AAB for store distribution. Updates must retain the same signing certificate and data.
+After committing the checked source, `python3 scripts/package.py` archives `HEAD`, validates distributions and writes checksums under `dist/`. Outputs include the Anything GitHub APKs, the Play AAB, test APK, source ZIP, store assets and reports. The GitHub APKs offer in-app funding links. Use the Play AAB for store distribution. Updates must retain the same signing certificate and data.
+
+For GitHub releases, publish `anything.apk` as **Anything for Android (recommended)** and `anything-with-sms.apk` as **Anything with SMS search**. Keep the byte-identical `anything-play.apk` under a **Legacy download link** label so previously shared URLs still work. Upload `SHA256SUMS-release.txt` with those three APKs.
 
 ## Support and submission
 
