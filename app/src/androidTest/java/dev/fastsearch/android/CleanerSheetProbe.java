@@ -312,7 +312,7 @@ public final class CleanerSheetProbe extends Instrumentation {
     }
 
     private void verifySidebar(Activity host)throws Exception {
-        for(String[] shortcut:new String[][]{{"Cleaner","Temp & cache"},{"Duplicate finder","Exact duplicates"}}){
+        for(String[] shortcut:new String[][]{{"Cleaner","Likely junk"},{"Duplicate finder","Exact duplicates"}}){
             main(()->{
                 host.findViewById(R.id.browse_locations).performClick();
                 StorageDrawer drawer=(StorageDrawer)get(host,"storageDrawer");
@@ -321,9 +321,12 @@ public final class CleanerSheetProbe extends Instrumentation {
             });
             main(()->{
                 AppSheet panel=(AppSheet)get(host,"activeSheet");
-                View mode=panel==null?null:find(panel.content,shortcut[1]);
-                check(panel!=null&&panel.isShowing()&&mode!=null&&mode.isSelected(),
+                View mode=panel==null?null:byDescription(panel.content,"Scan type: "+shortcut[1]);
+                check(panel!=null&&panel.isShowing()&&mode instanceof Button&&mode.isSelected(),
                         shortcut[0]+" directly opens its matching scan category");
+                check(find(panel.content,"Scope")!=null&&find(panel.content,"Filters")!=null
+                        &&find(panel.content,"Backups")==null&&find(panel.content,"Archives")==null,
+                        "review categories are separate and default controls remain visible");
                 panel.dismiss();
             });
         }
@@ -349,6 +352,14 @@ public final class CleanerSheetProbe extends Instrumentation {
         }
         return null;
     }
+    private static View byDescription(View label,String description){
+        if(description.equals(label.getContentDescription()))return label;
+        if(label instanceof ViewGroup)for(int i=0;i<((ViewGroup)label).getChildCount();i++){
+            View found=byDescription(((ViewGroup)label).getChildAt(i),description);if(found!=null)return found;
+        }
+        return null;
+    }
+
     private static Button button(View view,String label){
         View result=find(view,label);if(!(result instanceof Button))throw new AssertionError("Missing "+label);return (Button)result;
     }

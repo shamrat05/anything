@@ -131,6 +131,9 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private FolderPathDialog pathDialog;
     private int sort,layoutMode,activeLayout=-1,multiTypes;
     private AppSheet activeSheet;
+    private static final int CLEANER_PREVIEW_REQUEST=1734;
+    private AppSheet cleanerPreviewOwner;
+    private Runnable cleanerPreviewReturn;
     private StorageDrawer storageDrawer;
     private String overviewVolumeRoot;
     private String cacheRootForLabels;
@@ -345,7 +348,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         cancelRootWatch();
         if(itemActions!=null)itemActions.stop();
         thumbnails.pause();appOwnerBadges.pause();
-        if(activeSheet!=null){activeSheet.dismiss();activeSheet=null;}
+        if(activeSheet!=null&&cleanerPreviewOwner!=activeSheet){activeSheet.dismiss();activeSheet=null;}
         if(spotlightTour!=null)spotlightTour.close();
         if(storageDrawer!=null)storageDrawer.dismiss();
         if(navigationMenu!=null)navigationMenu.dismiss();
@@ -355,6 +358,8 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         index.removeListener(this);FileOperationService.removeListener(operationListener);super.onStop();
     }
     @Override protected void onDestroy(){
+        if(cleanerPreviewOwner!=null){cleanerPreviewOwner.dismiss();cleanerPreviewOwner=null;}
+        cleanerPreviewReturn=null;
         if(navigationMenu!=null)navigationMenu.dismiss();
         if(subtypePopup!=null)subtypePopup.dismiss();
         if(isFinishing())while(!minimizedPreviews.isEmpty())discardMinimizedPreview(0);
@@ -1440,10 +1445,21 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             if(dev.fastsearch.core.CleanerRules.isSharedVolumeRoot(path))volumes.put(path,volume.getKey());
         }
         AppSheet sheet=CleanerSheet.create(this,index,volumes,CleanerReviewScanner.INSTANCE,
-                dismissed->{if(activeSheet==dismissed)activeSheet=null;},this::revealPreviewFile,firstMode);
+                dismissed->{if(activeSheet==dismissed)activeSheet=null;},this::revealPreviewFile,firstMode,this::openCleanerPreview);
         activeSheet=sheet;
         sheet.show();
     }
+    private void openCleanerPreview(AppSheet sheet,FileEntry entry,String identity,Runnable returned){
+        if(activeSheet!=sheet||!sheet.isShowing()||cleanerPreviewOwner!=null||isFinishing()||isDestroyed())return;
+        PreviewSession session=PreviewSession.create(java.util.Collections.singletonList(entry),entry.path(),false);
+        cleanerPreviewOwner=sheet;cleanerPreviewReturn=returned;
+        try{startActivityForResult(FileViewerActivity.cleanerIntent(this,entry,session.id,identity),CLEANER_PREVIEW_REQUEST);}
+        catch(RuntimeException unavailable){
+            cleanerPreviewOwner=null;cleanerPreviewReturn=null;PreviewSession.release(session.id);
+            toast("Couldn’t open the file preview.");
+        }
+    }
+
     private void showDualPane(){
         if(isFinishing()||isDestroyed())return;
         if(activeSheet!=null)activeSheet.dismiss();
@@ -2695,6 +2711,14 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         replaceResults();runSearch();saveBrowseLocation();
     }
     @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);
+        if(request==CLEANER_PREVIEW_REQUEST){
+            AppSheet owner=cleanerPreviewOwner;
+            Runnable returned=cleanerPreviewReturn;
+            cleanerPreviewOwner=null;cleanerPreviewReturn=null;
+            if(data!=null)PreviewSession.release(data.getStringExtra(PreviewSession.EXTRA));
+            if(owner!=null&&owner==activeSheet&&returned!=null)owner.content.post(returned);
+            return;
+        }
         if(request==DualPaneManager.PREVIEW_REQUEST){
             if(result==RESULT_OK&&data!=null&&handlePreviewNavigationResult(data))return;
             if(data!=null)PreviewSession.release(data.getStringExtra(PreviewSession.EXTRA));

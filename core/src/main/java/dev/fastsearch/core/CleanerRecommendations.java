@@ -132,6 +132,14 @@ public final class CleanerRecommendations {
         return new Item(entry,Rule.METADATA_CLUE,false,match==null?Rule.METADATA_CLUE.reason:match.reason.label);
     }
 
+    /** Default Cleaner is narrower than review: old partial downloads and old designated temp only. */
+    public static boolean isLikelyJunk(Item item){
+        if(item==null||item.disposition!=Disposition.SUGGESTED_REVIEW)return false;
+        // Generic .part/.download names can be unrelated files. Keep them in Downloads review.
+        return item.rule==Rule.SHARED_TEMP||item.rule==Rule.DOWNLOAD_PARTIAL
+                &&(item.entry.foldedName.endsWith(".crdownload")||item.entry.foldedName.endsWith(".opdownload"));
+    }
+
     /**
      * Builds a bounded plan over the caller's already-discovered immutable records; performs no I/O.
      * Conflicting observations of an exact path are omitted instead of choosing one for review.
@@ -199,7 +207,7 @@ public final class CleanerRecommendations {
     private static Item review(FileEntry e,Rule rule){return new Item(e,rule,false,rule.reason);}
     private static Item byAge(FileEntry entry,long now,boolean located,long age,Rule rule){
         if(!located)return review(entry,Rule.OUTSIDE_EXPECTED_FOLDER);
-        if(entry.modified<0||entry.modified>now)return review(entry,Rule.UNKNOWN_AGE);
+        if(entry.modified<=0||entry.modified>now)return review(entry,Rule.UNKNOWN_AGE);
         if(now-entry.modified<age)return review(entry,Rule.RECENT_FILE);
         return new Item(entry,rule,true,rule.reason);
     }

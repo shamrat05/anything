@@ -55,18 +55,18 @@ final class CleanerReviewScanner implements CleanerSheet.Scanner {
         WalkTotals visited=walk(request,cancelled,progress,entry->{
             CleanerRules.Match match=CleanerRules.classify(entry,now,filter);
             CleanerRecommendations.Item recommendation=CleanerRecommendations.classify(entry,now,filter,false);
+            boolean junk=CleanerRecommendations.isLikelyJunk(recommendation);
+            if(request.mode==CleanerSheet.Mode.TEMP_CACHE&&!junk)return;
             String installerName=request.mode==CleanerSheet.Mode.DOWNLOADS&&recommendation!=null
                     ?entry.name.toLowerCase(java.util.Locale.ROOT):"";
             boolean downloadInstaller=(installerName.endsWith(".apk")||installerName.endsWith(".apks")
                         ||installerName.endsWith(".apkm")||installerName.endsWith(".xapk"))
                     &&request.sharedRoots.stream().anyMatch(root->entry.parent.equalsIgnoreCase(root+"/Download")
                         ||entry.parent.equalsIgnoreCase(root+"/Downloads"));
-            if(!downloadInstaller&&(match==null||!matches(request.mode,match)))return;
+            if(request.mode!=CleanerSheet.Mode.TEMP_CACHE&&!downloadInstaller&&(match==null||!matches(request.mode,match)))return;
             matched[0]++;
-            boolean suggested=recommendation!=null&&request.mode!=CleanerSheet.Mode.CUSTOM
-                    &&recommendation.disposition==CleanerRecommendations.Disposition.SUGGESTED_REVIEW;
             CleanerSheet.Row row=new CleanerSheet.Row(entry,recommendation==null?match.reason.label:recommendation.reason,
-                    suggested);
+                    request.mode==CleanerSheet.Mode.TEMP_CACHE&&junk);
             if(best.size()<MAX_ROWS)best.add(row);
             else if(INTEREST.compare(row,best.peek())<0){best.poll();best.add(row);}
         });
@@ -112,9 +112,7 @@ final class CleanerReviewScanner implements CleanerSheet.Scanner {
     static boolean matches(CleanerSheet.Mode mode,CleanerRules.Match match) {
         switch(mode){
             case DOWNLOADS: return match.reason==CleanerRules.Reason.DOWNLOAD_MARKER;
-            case TEMP_CACHE: return match.category==CleanerRules.Category.CACHE
-                    ||match.category==CleanerRules.Category.LEFTOVER
-                    ||match.category==CleanerRules.Category.TEMPORARY&&match.reason!=CleanerRules.Reason.DOWNLOAD_MARKER;
+            case TEMP_CACHE: return false; // Default mode uses the stricter evidence policy above.
             case BACKUPS: return match.category==CleanerRules.Category.BACKUP;
             case ARCHIVES: return match.category==CleanerRules.Category.ARCHIVE;
             case SOCIAL: return match.category==CleanerRules.Category.SOCIAL_MEDIA;

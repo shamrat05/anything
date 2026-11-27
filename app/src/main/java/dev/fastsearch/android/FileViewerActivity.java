@@ -91,6 +91,10 @@ public final class FileViewerActivity extends Activity {
     private static final ThreadPoolExecutor PREVIEWS = createExecutor();
     static final String EXTRA_MINIMIZED = "preview.minimized", EXTRA_REVEAL = "preview.reveal";
     private static final String EXTRA_RESTORE = "preview.restore";
+    private static final String EXTRA_CLEANER_REVIEW="preview.cleanerReview",
+            EXTRA_CLEANER_REVISION="preview.cleanerRevision";
+    private boolean cleanerReview;
+    private String cleanerRevision;
     private static final String EXTRA_NAME = "preview.name", EXTRA_PATH = "preview.path", EXTRA_SIZE = "preview.size";
     private enum Kind { IMAGE, SVG, VIDEO, AUDIO, PDF, TEXT, MARKDOWN, HTML, OFFICE, ZIP, STREAM_ARCHIVE, SEVEN_Z, APK, DEX, OTHER }
     private static final int CACHE_BYTES=(int)Math.min(24L*1024*1024,Math.max(4L*1024*1024,Runtime.getRuntime().maxMemory()/16));
@@ -161,6 +165,11 @@ public final class FileViewerActivity extends Activity {
                 .putExtra(EXTRA_NAME, name).putExtra(EXTRA_PATH, path).putExtra(EXTRA_SIZE, size);
     }
 
+    static Intent cleanerIntent(Context context,FileEntry entry,String session,String identity){
+        return intent(context,null,entry.name,entry.path(),entry.size).putExtra(PreviewSession.EXTRA,session)
+                .putExtra(EXTRA_CLEANER_REVIEW,true).putExtra(EXTRA_CLEANER_REVISION,identity);
+    }
+
     /** Only locally opened file metadata is returned. No URI, descriptor, View or bitmap is docked. */
     static Intent restoreIntent(Context context, Bundle state) {
         return intent(context,null,state.getString("fileName"),state.getString("filePath"),state.getLong("fileSize",-1))
@@ -186,6 +195,8 @@ public final class FileViewerActivity extends Activity {
         focusMode=saved!=null&&saved.getBoolean("focusMode",false);
         readerSize=Math.max(12,Math.min(26,getSharedPreferences("ui",0).getInt("readerSize",16)));readerSource=saved!=null&&saved.getBoolean("readerSource",false);
         if(saved!=null){playbackSpeed=saved.getFloat("playbackSpeed",1);WindowManager.LayoutParams attributes=getWindow().getAttributes();attributes.screenBrightness=saved.getFloat("brightness",-1);getWindow().setAttributes(attributes);}
+        cleanerReview=getIntent().getBooleanExtra(EXTRA_CLEANER_REVIEW,false);
+        cleanerRevision=getIntent().getStringExtra(EXTRA_CLEANER_REVISION);
         uri = getIntent().getData();
         name = getIntent().getStringExtra(EXTRA_NAME);
         path = getIntent().getStringExtra(EXTRA_PATH);
@@ -218,6 +229,7 @@ public final class FileViewerActivity extends Activity {
         if(saved!=null && saved.getString("readerLanguage")!=null)
             try{readerLanguage=CodeSyntax.Language.valueOf(saved.getString("readerLanguage"));}
             catch(IllegalArgumentException ignored){}
+        if(cleanerReview)playWhenReady=false;
         plainTextOverride=saved!=null&&saved.getBoolean("plainTextOverride")&&canReadAsText();
         if(plainTextOverride)kind=Kind.TEXT;
         if(saved!=null&&uri==null&&session==null&&!path.isEmpty()){
@@ -324,7 +336,7 @@ public final class FileViewerActivity extends Activity {
         });
         setContentView(root);
         LinearLayout bar=row();bar.setPadding(dp(4),dp(2),dp(4),dp(2));bar.setMinimumHeight(dp(52));
-        ImageButton back=actionIcon(R.drawable.ic_back,"Back to files",View.NO_ID);
+        ImageButton back=actionIcon(R.drawable.ic_back,cleanerReview?"Back to review":"Back to files",View.NO_ID);
         back.setOnClickListener(view -> handleBack()); bar.addView(back);
         LinearLayout identity = new LinearLayout(this); viewerIdentity=identity;identity.setOrientation(LinearLayout.VERTICAL);
         identity.setPadding(dp(4),dp(2),dp(4),dp(2));
@@ -381,13 +393,13 @@ public final class FileViewerActivity extends Activity {
         focusMode=enabled;
         viewerIdentity.setVisibility(enabled?View.INVISIBLE:View.VISIBLE);
         location.setVisibility(enabled?View.GONE:View.VISIBLE);
-        navigationDock.setVisibility(enabled?View.GONE:View.VISIBLE);
+        navigationDock.setVisibility(enabled||cleanerReview?View.GONE:View.VISIBLE);
         selectedTray.setVisibility(!enabled&&session!=null&&!session.selected.isEmpty()?View.VISIBLE:View.GONE);
         focusAction.setImageResource(enabled?R.drawable.ic_preview_exit_focus:R.drawable.ic_preview_focus);
         String action=enabled?"Exit focus mode":"Enter focus mode";
         focusAction.setContentDescription(action);focusAction.setTooltipText(action);focusAction.setSelected(enabled);
     }
-    private boolean canReturnFile(){return session!=null&&!session.entries.isEmpty()&&path.startsWith("/")&&!selectionBusy;}
+    private boolean canReturnFile(){return !cleanerReview&&session!=null&&!session.entries.isEmpty()&&path.startsWith("/")&&!selectionBusy;}
     private void minimize(){
         if(!canReturnFile())return;
         Bundle state=new Bundle();captureViewerState(state);
@@ -414,6 +426,11 @@ public final class FileViewerActivity extends Activity {
     }
     private void showFileActions(View anchor) {
         android.view.Menu menu=theme.popup(this,anchor).getMenu();
+        if(cleanerReview){
+            menu.add("Properties");
+            previewActions.begin(new FileHoldActions.Target(anchor,currentEntry(),false,false,menu,label->showProperties()));
+            return;
+        }
         boolean toPane=availablePeerTarget(),hasPath=!path.isEmpty();
         menu.add(0,3,0,"Share file");
         menu.add(0,R.id.preview_copy,1,toPane?"Copy to other pane":"Copy file").setEnabled(hasPath&&!selectionBusy&&!viewerTransfer);
@@ -612,9 +629,9 @@ public final class FileViewerActivity extends Activity {
             getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("File path",path));haptic(location);});activeSheet.show();}
     private void haptic(View source){if(getSharedPreferences("ui",0).getBoolean("haptics",true))source.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK);}
     private void ensureSession(){if(session!=null)return;ArrayList<FileEntry> entries=new ArrayList<>();entries.add(currentEntry());session=PreviewSession.create(entries,path,false);getIntent().putExtra(PreviewSession.EXTRA,session.id);}
-    private void selectCurrent(){ensureSession();FileEntry entry=currentEntry();if(session.selected.containsKey(entry.path()))return;
+    private void selectCurrent(){if(cleanerReview)return;ensureSession();FileEntry entry=currentEntry();if(session.selected.containsKey(entry.path()))return;
         if(!session.toggle(entry)){Toast.makeText(this,"Choose up to 512 items at once",Toast.LENGTH_SHORT).show();return;}haptic(stage);updateFileControls();}
-    private void toggleCurrent(){ensureSession();if(!session.toggle(currentEntry()))Toast.makeText(this,"Choose up to 512 items at once",Toast.LENGTH_SHORT).show();else haptic(selectFile);updateFileControls();}
+    private void toggleCurrent(){if(cleanerReview)return;ensureSession();if(!session.toggle(currentEntry()))Toast.makeText(this,"Choose up to 512 items at once",Toast.LENGTH_SHORT).show();else haptic(selectFile);updateFileControls();}
     private void updateFileControls(){
         boolean multiple=session!=null&&session.entries.size()>1;
         fileNavigation.setVisibility(multiple?View.VISIBLE:View.GONE);
@@ -852,7 +869,7 @@ public final class FileViewerActivity extends Activity {
                     ?"Opening slide "+(page+1):"Opening preview");
         job = new PreviewJob(this, getApplicationContext(), uri, kind, page, generation);
         job.restoreState=restoreOnLoad;restoreOnLoad=false;
-        if(uri==null&&session!=null){job.entry=currentEntry();job.allowRoot=session.root;}
+        if(uri==null&&session!=null){job.entry=currentEntry();job.allowRoot=!cleanerReview&&session.root;}
         try { pending = PREVIEWS.submit(job); }
         catch (java.util.concurrent.RejectedExecutionException busy) { job.cancel(); job = null; failure("Another preview is finishing.",true); }
     }
@@ -884,10 +901,43 @@ public final class FileViewerActivity extends Activity {
         else if (kind == Kind.APK) showApk(result.apk);
         else if (kind == Kind.DEX) showDexEntry();
         else showMedia(result);
+        if(cleanerReview)hideReviewTransfers(previewContent);
         if(cover!=null&&shown==result){
             PreviewContent current=previewContent;boolean waitsForFrame=kind==Kind.VIDEO&&playWhenReady;
             current.coverWith(cover,waitsForFrame);
             if(waitsForFrame)ui.postDelayed(()->{if(previewContent==current)current.reveal();},2400);
+        }
+    }
+
+    private void hideReviewTransfers(View view){
+        if(view instanceof Button){
+            CharSequence label=((Button)view).getText();
+            if("Open in another app".contentEquals(label)||"Browse DEX classes".contentEquals(label)
+                    ||"Inspect APK".contentEquals(label)){
+                view.setOnClickListener(null);view.setVisibility(View.GONE);
+            }
+        }
+        if(view instanceof TextView&&((TextView)view).isTextSelectable())
+            ((TextView)view).setCustomSelectionActionModeCallback(new android.view.ActionMode.Callback(){
+                public boolean onCreateActionMode(android.view.ActionMode mode,android.view.Menu menu){return true;}
+                public boolean onPrepareActionMode(android.view.ActionMode mode,android.view.Menu menu){
+                    boolean changed=false;
+                    for(int i=menu.size()-1;i>=0;i--){
+                        android.view.MenuItem item=menu.getItem(i);
+                        if(item.getItemId()==android.R.id.shareText||item.getIntent()!=null){
+                            menu.removeItem(item.getItemId());changed=true;
+                        }
+                    }
+                    return changed;
+                }
+                public boolean onActionItemClicked(android.view.ActionMode mode,android.view.MenuItem item){
+                    return item.getItemId()==android.R.id.shareText||item.getIntent()!=null;
+                }
+                public void onDestroyActionMode(android.view.ActionMode mode){}
+            });
+        if(view instanceof ViewGroup){
+            ViewGroup group=(ViewGroup)view;
+            for(int i=0;i<group.getChildCount();i++)hideReviewTransfers(group.getChildAt(i));
         }
     }
 
@@ -1059,8 +1109,16 @@ public final class FileViewerActivity extends Activity {
             syntax.setVisibility(rich||preview.code==null||result.text.isEmpty()?View.GONE:View.VISIBLE);
             if(rich){
                 content.setTypeface(getResources().getFont(R.font.inter));content.setLineSpacing(dp(4),1.12f);
-                content.setText(preview.formatted);
-                content.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+                if(cleanerReview){
+                    android.text.SpannableString passive=new android.text.SpannableString(preview.formatted);
+                    for(android.text.style.ClickableSpan link:passive.getSpans(0,passive.length(),android.text.style.ClickableSpan.class))
+                        passive.removeSpan(link);
+                    content.setText(passive);
+                    content.setMovementMethod(android.text.method.ArrowKeyMovementMethod.getInstance());
+                }else{
+                    content.setText(preview.formatted);
+                    content.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+                }
             }else{
                 // Selectable movement must be reinstalled when changing back from a rich document.
                 content.setMovementMethod(android.text.method.ArrowKeyMovementMethod.getInstance());
@@ -1142,7 +1200,7 @@ public final class FileViewerActivity extends Activity {
     }
 
     private boolean canInstallApk() {
-        return kind == Kind.APK && shown != null && shown.apk != null
+        return !cleanerReview && kind == Kind.APK && shown != null && shown.apk != null
                 && ApkInstallAction.supported() && shown.apk.canInstall();
     }
 
@@ -1473,13 +1531,13 @@ public final class FileViewerActivity extends Activity {
     }
 
     private void browseDex() {
-        if (shown == null || shown.identity == null || (kind != Kind.APK && kind != Kind.DEX)) return;
+        if (cleanerReview || shown == null || shown.identity == null || (kind != Kind.APK && kind != Kind.DEX)) return;
         startActivity(DexViewerActivity.intent(this, uri, name, path, shown.identity,
                 session != null && session.root, kind == Kind.APK));
     }
 
     private boolean canExtract() {
-        if (shown == null) return false;
+        if (cleanerReview || shown == null) return false;
         if (kind == Kind.STREAM_ARCHIVE) return StreamArchiveExtraction.format(name) != null
                 && shown.size<=ArchiveExtraction.MAX_BYTES && (shown.tar==null||!shown.tar.requiresDedicatedApp());
         if (kind == Kind.SEVEN_Z) return shown.sevenZip != null && shown.sevenZip.count > 0;
@@ -1796,7 +1854,7 @@ public final class FileViewerActivity extends Activity {
         Context context = getApplicationContext();
         CancellationSignal signal = new CancellationSignal();
         ArchivePdfReader reader = format == Kind.PDF ? new ArchivePdfReader(sheet, status, entryName) : null;
-        if (!entry.encrypted && (entry.method == 0 || entry.method == 8) && entry.size <= ArchiveEntryFile.MAX_BYTES) {
+        if (!cleanerReview && !entry.encrypted && (entry.method == 0 || entry.method == 8) && entry.size <= ArchiveEntryFile.MAX_BYTES) {
             ImageButton share = actionIcon(R.drawable.ic_share, "Share archive entry", View.NO_ID);
             share.setOnClickListener(v -> {
                 share.setEnabled(false);
@@ -1958,7 +2016,11 @@ public final class FileViewerActivity extends Activity {
                     if(prepared==null){status.setText(message==null?"Could not open this archive entry.":message);return;}
                     pending.set(null);
                     progress.dismiss();activeSheet=null;
-                    try{startActivity(intent(this,prepared,entryName,null,entrySize));}
+                    try{
+                        Intent next=intent(this,prepared,entryName,null,entrySize);
+                        if(cleanerReview)next.putExtra(EXTRA_CLEANER_REVIEW,true);
+                        startActivity(next);
+                    }
                     catch(RuntimeException unable){
                         ArchivePreviewSources.release(prepared);
                         Toast.makeText(this,"Could not open this archive entry.",Toast.LENGTH_LONG).show();
@@ -2184,11 +2246,11 @@ public final class FileViewerActivity extends Activity {
             archivePosition = archiveList.getFirstVisiblePosition(); View first = archiveList.getChildAt(0); archiveTop = first == null ? 0 : first.getTop();
         }
     }
-    private void rememberFile(){rememberView();snapshotMedia();if(stateKey==null||Build.VERSION.SDK_INT<27)return;
+    private void rememberFile(){rememberView();snapshotMedia();if(cleanerReview||stateKey==null||Build.VERSION.SDK_INT<27)return;
         ViewState state=new ViewState();state.page=page;state.mediaPosition=mediaPosition;state.playing=playWhenReady;state.completed=mediaCompleted;state.readerSource=readerSource;
         state.zoom=zoom;state.centerX=centerX;state.centerY=centerY;state.scrollY=scrollY;state.archivePosition=archivePosition;state.archiveTop=archiveTop;
         synchronized(VIEW_STATES){VIEW_STATES.put(stateKey,state);}}
-    private void restoreViewState(ViewState state){page=state.page;mediaPosition=state.mediaPosition;playWhenReady=state.playing;mediaCompleted=state.completed;readerSource=state.readerSource;
+    private void restoreViewState(ViewState state){page=state.page;mediaPosition=state.mediaPosition;playWhenReady=!cleanerReview&&state.playing;mediaCompleted=state.completed;readerSource=state.readerSource;
         zoom=state.zoom;centerX=state.centerX;centerY=state.centerY;scrollY=state.scrollY;archivePosition=state.archivePosition;archiveTop=state.archiveTop;}
 
     private void clearShown() {
@@ -2227,7 +2289,7 @@ public final class FileViewerActivity extends Activity {
         if(canReadAsText())addPreviewAction(content,"Read as text",()->{
             plainTextOverride=true;kind=Kind.TEXT;load();
         });
-        if(uri!=null||session!=null)addPreviewAction(content,"Open in another app",this::openExternal);
+        if(!cleanerReview&&(uri!=null||session!=null))addPreviewAction(content,"Open in another app",this::openExternal);
         if(canReturnFile())addPreviewAction(content,"Show in Anything Files",this::revealFile);
         body.addView(content,new ScrollView.LayoutParams(-1,-2));
         previewContent.addView(body,new FrameLayout.LayoutParams(-1,-2,Gravity.CENTER));
@@ -2244,6 +2306,7 @@ public final class FileViewerActivity extends Activity {
     }
 
     private void sendCurrentFile(boolean share) {
+        if(cleanerReview)return;
         if(uri==null){FileEntry entry=currentEntry();boolean root=session!=null&&session.root;String identity=shown==null?null:shown.identity;Context context=getApplicationContext();
             try{actions.execute(()->{try{Uri grant=RootFileProvider.issue(context,entry,root,identity);ui.post(()->{if(!destroyed&&!isFinishing()&&entry.path().equals(path)){uri=grant;sendCurrentFile(share);}});}
                 catch(Exception failure){ui.post(()->{if(!destroyed&&!isFinishing())Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show();});}});}
@@ -2663,7 +2726,8 @@ public final class FileViewerActivity extends Activity {
         Uri uri;
         FileEntry entry;
         boolean allowRoot,restoreState;
-        final String sourcePath;
+        final String sourcePath, expectedCleanerRevision;
+        final boolean readOnlyReview;
         String sourceName;
         final CodeSyntax.Language language;
         final Kind kind;
@@ -2672,6 +2736,8 @@ public final class FileViewerActivity extends Activity {
         final CancellationSignal signal = new CancellationSignal();
         PreviewJob(FileViewerActivity owner, Context context, Uri uri, Kind kind, int page, int generation) {
             this.owner = new WeakReference<>(owner); this.context = context; this.uri = uri; this.kind = kind; requestedPage = page; this.generation = generation;
+            readOnlyReview=owner!=null&&owner.cleanerReview;
+            expectedCleanerRevision=owner==null?null:owner.cleanerRevision;
             sourcePath=owner==null?String.valueOf(uri):owner.path;sourceName=owner==null?"":owner.name;language=owner==null?null:owner.readerLanguage;allowRoot=owner!=null&&owner.session!=null&&owner.session.root;
         }
         void cancel() { cancelled.set(true); signal.cancel(); }
@@ -2685,7 +2751,7 @@ public final class FileViewerActivity extends Activity {
             try {
                 checkCancelled();
                 result.uri=uri;
-                if(kind==Kind.OTHER){
+                if(kind==Kind.OTHER&&!readOnlyReview){
                     String ext = extension(sourceName);
                     result.error = otherPreviewMessage(ext);
                     return result;
@@ -2695,11 +2761,14 @@ public final class FileViewerActivity extends Activity {
                 checkCancelled(); result.size = file.getStatSize();
                 if (result.size < 0) throw new IOException("This file does not support a seekable preview.");
                 result.identity=RootFileProvider.identity(Os.fstat(file.getFileDescriptor()));
+                if(readOnlyReview&&uri==null&&(expectedCleanerRevision==null||!expectedCleanerRevision.equals(result.identity)))
+                    throw new PreviewLimit("This file changed. Return to Cleaner and run a new scan.");
+                if(kind==Kind.OTHER){result.error=otherPreviewMessage(extension(sourceName));return result;}
                 result.key=sourcePath+'\0'+allowRoot+':'+result.identity;
                 if(kind==Kind.TEXT&&"ts".equals(extension(sourceName))&&looksLikeTransportStream(file,result.size)){
                     result.transportStream=true;result.media=file;file=null;return result;
                 }
-                boolean preciseMetadata=Build.VERSION.SDK_INT>=27;
+                boolean preciseMetadata=!readOnlyReview&&Build.VERSION.SDK_INT>=27;
                 if(restoreState&&preciseMetadata)synchronized(VIEW_STATES){result.state=VIEW_STATES.get(result.key);}
                 int wantedPage=result.state==null?requestedPage:result.state.page;
                 String cacheKey=result.key+':'+kind+':'+(kind==Kind.PDF?wantedPage:0)+':'+sourceName+':'+language;

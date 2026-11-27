@@ -17,6 +17,7 @@ public final class CleanerRecommendationsTest {
     public static void main(String[] args)throws Exception{
         exactRules();
         protection();
+        likelyJunk();
         planning();
         bounds();
         System.out.println("PASS "+assertions+" Cleaner review recommendation assertions.");
@@ -49,6 +50,32 @@ public final class CleanerRecommendationsTest {
                     .rule==CleanerRecommendations.Rule.DOWNLOAD_INSTALLER,"relative location works on a direct external mount");
         check(CleanerRecommendations.Rule.DOWNLOAD_INSTALLER.id.equals("download.installer.old")
                 &&CleanerRecommendations.Rule.DOWNLOAD_PARTIAL.reason.contains("7 days"),"stable ID and displayed rule evidence");
+    }
+
+    private static void likelyJunk(){
+        for(String path:new String[]{"Download/pending.mp4.crdownload","Downloads/video.opdownload",
+                "Temp/print.tmp","Download/Tmp/print.temp"}){
+            CleanerRecommendations.Item item=classify(file(path,45,20),false);
+            check(CleanerRecommendations.isLikelyJunk(item)&&item.suggestedLogicalBytes==20,
+                    "old known-location browser or temp marker enters likely junk: "+path);
+        }
+        for(String path:new String[]{"Downloads/normal.apk","Downloads/research.part","Downloads/export.download",
+                "Backup/archive.mp4.crdownload","Download/photo.jpg.bak.crdownload","Download/dataset.zip.crdownload",
+                "Documents/clutter.tmp","Downloads/old.zip","DCIM/.thumbnails/.thumbdata1",
+                "Documents/old.xls","WhatsApp/Media/photo.jpg"}){
+            check(!CleanerRecommendations.isLikelyJunk(classify(file(path,100,1234567),false)),
+                    "valuable or ambiguous file cannot count as default junk: "+path);
+        }
+        check(!CleanerRecommendations.isLikelyJunk(classify(file("Download/running.mp4.crdownload",1,80),false)),
+                "recent partials stay out");
+        check(!CleanerRecommendations.isLikelyJunk(classify(file("Download/active.mp4.crdownload",100,123),true)),
+                "files known in use stay out");
+        for(long modified:new long[]{0,-1,NOW+DAY}){
+            CleanerRecommendations.Item uncertain=classify(new FileEntry(ROOT+"/Temp/time.tmp",false,4096,modified),false);
+            check(uncertain!=null&&uncertain.rule==CleanerRecommendations.Rule.UNKNOWN_AGE
+                    &&!CleanerRecommendations.isLikelyJunk(uncertain),"unreliable age never counts");
+        }
+        check(!CleanerRecommendations.isLikelyJunk(classify(file("Temp/empty.tmp",100,0),false)),"no claim for empty file");
     }
 
     private static void protection(){

@@ -21,7 +21,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.HorizontalScrollView;
+import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -49,10 +49,10 @@ final class CleanerSheet {
     enum Mode {
         DUPLICATES("Exact duplicates",R.drawable.ic_copy,
                 "Compares file contents. Keep at least one from each exact match group."),
-        TEMP_CACHE("Temp & cache",R.drawable.ic_file,
-                "Looks for temporary names and shared cache folders. Apps may still rely on these files."),
+        TEMP_CACHE("Likely junk",R.drawable.ic_cleaner,
+                "Aged partial downloads and temporary files in known folders."),
         DOWNLOADS("Downloads",R.drawable.ic_folder,
-                "Reviews older installers and unfinished downloads. Check the reason before touching a file."),
+                "Review installers and unfinished downloads separately."),
         BACKUPS("Backups",R.drawable.ic_document,
                 "Looks for backup copies. A backup may be your only recoverable copy."),
         ARCHIVES("Archives",R.drawable.ic_archive,
@@ -71,6 +71,7 @@ final class CleanerSheet {
         Result scan(Request request,BooleanSupplier cancelled,Progress progress)throws Exception;
     }
     interface Progress { void changed(String phase,long visited); }
+    interface PreviewLaunch { void open(AppSheet owner,FileEntry entry,String identity,Runnable returned); }
 
     static final class Request {
         final String scope, extensions;
@@ -133,8 +134,14 @@ final class CleanerSheet {
 
     static AppSheet create(Activity activity,FileIndex index,Map<String,String> sharedVolumes,
                            Scanner scanner,Consumer<AppSheet> dismissed,Consumer<String> reveal,Mode firstMode) {
+        return create(activity,index,sharedVolumes,scanner,dismissed,reveal,firstMode,null);
+    }
+
+    static AppSheet create(Activity activity,FileIndex index,Map<String,String> sharedVolumes,
+                           Scanner scanner,Consumer<AppSheet> dismissed,Consumer<String> reveal,Mode firstMode,
+                           PreviewLaunch preview) {
         CleanerSheet panel=new CleanerSheet(activity,index,sharedVolumes,scanner,dismissed,reveal);
-        panel.select(firstMode);
+        panel.preview=preview;panel.select(firstMode);
         return panel.sheet;
     }
 
@@ -147,12 +154,13 @@ final class CleanerSheet {
     private final FileIndex index;
     private final Scanner scanner;
     private final Consumer<String> reveal;
+    private PreviewLaunch preview;
+    private Future<?> previewTask;
     private final Map<String,String> roots;
     private final Handler ui=new Handler(Looper.getMainLooper());
     private final ScheduledThreadPoolExecutor worker=new ScheduledThreadPoolExecutor(1,r->new Thread(r,"cleaner-review"));
     private final TextView scopeLabel, modeHint, status;
-    private final Button pick, configure, run, safeCleanup, selectExtras, clearExtras;
-    private final Button suggestedOnly;
+    private final Button pick, configure, scanType, run, selectExtras, clearExtras;
     private EditText resultSearch;
     private Button shownSelection, verifySelection;
     private boolean onlySelected;
@@ -160,16 +168,12 @@ final class CleanerSheet {
     private final Runnable resultFilter=()->{
         if(!this.closed&&resultSearch!=null)applyResultFilter();
     };
-    private int suggestedCount;
-    private long suggestedBytes;
-    private boolean filteringSuggestions;
     private final TextView selectionStatus;
     private final LinearLayout duplicateActions;
     final DuplicateReview duplicateReview=new DuplicateReview();
     private final ProgressBar spinner;
     private final EdgeFastScroll.List files;
     private final Rows adapter=new Rows();
-    private final Map<Mode,Button> chips=new LinkedHashMap<>();
     private List<Row> rows=Collections.emptyList();
     private List<Object> display=Collections.emptyList();
     private List<String> excluded=Collections.emptyList();
@@ -196,46 +200,31 @@ final class CleanerSheet {
             if(dismissed!=null)dismissed.accept(sheet);
         });
 
-        TextView readOnly=sheet.text("Scanning never changes your files. Cleanup is separate and asks first.",13,sheet.theme.muted);
-        readOnly.setPadding(dp(5),0,dp(5),dp(8));
-        sheet.content.addView(readOnly,new LinearLayout.LayoutParams(-1,-2));
-
-        LinearLayout scopePanel=new LinearLayout(activity);
-        scopePanel.setOrientation(LinearLayout.VERTICAL);
-        scopePanel.setPadding(dp(10),dp(3),dp(10),dp(3));
-        scopePanel.setBackground(AppSheet.shape(sheet.theme.chrome,dp(15)));
-        pick=button("Choose a folder (optional)",R.drawable.ic_folder,this::chooseScope);
-        scopePanel.addView(pick,new LinearLayout.LayoutParams(-1,-2));
-        scopeLabel=sheet.text("",12,sheet.theme.muted);
-        scopeLabel.setMaxLines(2);scopeLabel.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-        scopeLabel.setPadding(dp(4),0,dp(4),dp(7));
-        scopePanel.addView(scopeLabel,new LinearLayout.LayoutParams(-1,-2));
-        sheet.content.addView(scopePanel,new LinearLayout.LayoutParams(-1,-2));
-
-        HorizontalScrollView horizontal=new HorizontalScrollView(activity);
-        horizontal.setHorizontalScrollBarEnabled(false);
-        LinearLayout modes=new LinearLayout(activity);
-        modes.setOrientation(LinearLayout.HORIZONTAL);
-        modes.setPadding(0,dp(7),0,dp(4));
-        for(Mode value:Mode.values()){
-            Button chip=button(value.label,value.icon,()->select(value));chips.put(value,chip);
-            LinearLayout.LayoutParams item=new LinearLayout.LayoutParams(-2,-2);item.setMarginEnd(dp(5));
-            modes.addView(chip,item);
-        }
-        horizontal.addView(modes,new FrameLayout.LayoutParams(-2,-2));
-        sheet.content.addView(horizontal,new LinearLayout.LayoutParams(-1,-2));
-
-        modeHint=sheet.text(mode.hint,13,sheet.theme.muted);modeHint.setPadding(dp(5),0,dp(5),dp(5));
-        sheet.content.addView(modeHint,new LinearLayout.LayoutParams(-1,-2));
+        LinearLayout controls=new LinearLayout(activity);
+        controls.setGravity(Gravity.CENTER_VERTICAL);
+        controls.setPadding(dp(4),0,dp(4),0);
+        controls.setBackground(AppSheet.shape(sheet.theme.chrome,dp(13)));
+        scanType=button(mode.label,mode.icon,this::chooseScanType);
+        scanType.setSingleLine();scanType.setEllipsize(TextUtils.TruncateAt.END);
+        scanType.setContentDescription("Scan type: "+mode.label);
+        controls.addView(scanType,new LinearLayout.LayoutParams(0,dp(48),1));
+        pick=button("Scope",R.drawable.ic_folder,this::chooseScope);
+        pick.setContentDescription("Choose storage or folder");
+        controls.addView(pick,new LinearLayout.LayoutParams(-2,dp(48)));
         configure=button("Filters",R.drawable.ic_options,this::chooseFilters);
-        sheet.content.addView(configure,new LinearLayout.LayoutParams(-1,-2));
-        safeCleanup=button("Safe cleanup · Thumbnail cache",R.drawable.ic_cleaner,this::reviewCache);
-        sheet.content.addView(safeCleanup,new LinearLayout.LayoutParams(-1,-2));
-        suggestedOnly=button("Review suggestions",R.drawable.ic_select,this::toggleSuggestions);
-        suggestedOnly.setVisibility(View.GONE);
-        sheet.content.addView(suggestedOnly,new LinearLayout.LayoutParams(-1,-2));
+        controls.addView(configure,new LinearLayout.LayoutParams(-2,dp(48)));
+        sheet.content.addView(controls,new LinearLayout.LayoutParams(-1,-2));
 
-        status=sheet.text("",13,sheet.theme.muted);
+        scopeLabel=sheet.text("",12,sheet.theme.muted);
+        scopeLabel.setSingleLine(true);scopeLabel.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        scopeLabel.setPadding(dp(5),dp(6),dp(5),0);
+        sheet.content.addView(scopeLabel,new LinearLayout.LayoutParams(-1,-2));
+        modeHint=sheet.text(mode.hint,12,sheet.theme.muted);
+        modeHint.setMaxLines(2);modeHint.setPadding(dp(5),dp(3),dp(5),dp(3));
+        sheet.content.addView(modeHint,new LinearLayout.LayoutParams(-1,-2));
+
+        status=sheet.text("",13,sheet.theme.ink);
+        status.setTypeface(activity.getResources().getFont(R.font.inter_medium));
         status.setPadding(dp(5),dp(6),dp(5),dp(6));
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         sheet.content.addView(status,new LinearLayout.LayoutParams(-1,-2));
@@ -296,6 +285,33 @@ final class CleanerSheet {
         run.setOnClickListener(v->{if(scanning)cancelScan("Scan canceled. No files changed.");else startScan();});
         updateChoices();
         status.setText(scanner==null?"Cleaner is unavailable in this build.":readyMessage());
+    }
+
+    private void chooseScanType(){
+        if(scanning||closed||secondary!=null)return;
+        AppSheet types=new AppSheet(activity,"Scan type");
+        secondary=types;types.setOnDismissListener(ignored->{if(secondary==types)secondary=null;});
+        addMode(types,Mode.TEMP_CACHE);
+        TextView review=types.text("Review separately",13,types.theme.muted);
+        review.setPadding(dp(6),dp(8),dp(6),dp(2));types.content.addView(review);
+        for(Mode option:Mode.values())if(option!=Mode.TEMP_CACHE)addMode(types,option);
+        TextView cache=types.text("Only Anything’s own generated data",12,types.theme.muted);
+        cache.setPadding(dp(6),dp(8),dp(6),dp(2));types.content.addView(cache);
+        types.content.addView(button("Anything thumbnail cache",R.drawable.ic_cleaner,()->{
+            if(secondary!=types)return;
+            secondary=null;types.dismiss();reviewCache();
+        }),new LinearLayout.LayoutParams(-1,dp(48)));
+        types.show();
+    }
+
+    private void addMode(AppSheet types,Mode option){
+        Button choice=button(option.label,option.icon,()->{
+            if(secondary!=types)return;
+            secondary=null;types.dismiss();select(option);
+        });
+        choice.setSelected(option==mode);
+        if(option==mode)choice.setBackground(background(sheet.theme.selected));
+        types.content.addView(choice,new LinearLayout.LayoutParams(-1,dp(48)));
     }
 
     private void chooseScope() {
@@ -398,20 +414,24 @@ final class CleanerSheet {
         scanning=false;task=null;
         rows=result.rows;
         duplicateReview.replace(result.duplicateGroups);
-        suggestedCount=0;suggestedBytes=0;filteringSuggestions=false;
-        for(Row row:rows)if(row.suggestedReview){
-            suggestedCount++;
-            suggestedBytes=DuplicateReview.add(suggestedBytes,Math.max(0,row.entry.size));
-        }
         resultSearch.setVisibility(rows.size()<2?View.GONE:View.VISIBLE);
-        rebuildDisplay();updateSuggestionButton();
+        rebuildDisplay();
         if(!rows.isEmpty())files.setSelection(0);
-        String summary=(rows.isEmpty()?"No matches":duplicateReview.active()
-                ?number(duplicateReview.groupCount())+(duplicateReview.groupCount()==1?" exact group":" exact groups")+"  ·  "+number(rows.size())+" files"
-                :number(rows.size())+(rows.size()==1?" file to review":" files to review"))
-                +"  ·  "+number(result.visited)+" checked";
+        String summary;
+        if(mode==Mode.TEMP_CACHE){
+            long bytes=0;int count=0;
+            for(Row row:rows)if(row.suggestedReview){bytes=DuplicateReview.add(bytes,row.entry.size);count++;}
+            summary=count==0?"No likely junk found":number(count)+(count==1?" candidate":" candidates")
+                    +"  ·  "+estimate(bytes)+" candidate size";
+        }else if(duplicateReview.active()){
+            summary=number(duplicateReview.groupCount())+(duplicateReview.groupCount()==1?" exact group":" exact groups")
+                    +"  ·  "+number(rows.size())+" files";
+        }else{
+            summary=rows.isEmpty()?"No review matches":number(rows.size())+(rows.size()==1?" file to review":" files to review");
+        }
+        summary+="  ·  "+number(result.visited)+" checked";
         if(result.skipped>0)summary+="  ·  "+number(result.skipped)+" skipped";
-        if(result.limited)summary+=". Scan was limited.";
+        if(result.limited)summary+=". Partial scan.";
         status.setText(summary);
         updateChoices();
     }
@@ -420,16 +440,11 @@ final class CleanerSheet {
         onlySelected=!onlySelected;rebuildDisplay();updateDuplicateChoices();files.setSelection(0);
     }
 
-    private void toggleSuggestions(){
-        filteringSuggestions=!filteringSuggestions;
-        rebuildDisplay();updateSuggestionButton();files.setSelection(0);
-    }
-
     private void rebuildDisplay(){
         List<Object> grouped=new ArrayList<>();
         DuplicateReview.Group last=null;
         for(Row row:rows){
-            if(filteringSuggestions&&!row.suggestedReview||!matchesResult(row.entry)
+            if(mode==Mode.TEMP_CACHE&&!row.suggestedReview||!matchesResult(row.entry)
                     ||onlySelected&&(row.review==null||!row.review.isSelected(row.member)))continue;
             if(row.review!=null&&row.review!=last){last=row.review;grouped.add(last);}
             grouped.add(row);
@@ -449,12 +464,6 @@ final class CleanerSheet {
         rebuildDisplay();updateDuplicateChoices();files.setSelection(0);
     }
 
-    private void updateSuggestionButton(){
-        suggestedOnly.setVisibility(suggestedCount==0?View.GONE:View.VISIBLE);
-        suggestedOnly.setText(filteringSuggestions?"Show all "+number(rows.size())+" results":
-                "Review "+number(suggestedCount)+" suggestions · "+estimate(suggestedBytes));
-    }
-
     private void cancelScan(String message) {
         revision++;scanning=false;
         if(task!=null){task.cancel(true);task=null;}
@@ -464,7 +473,6 @@ final class CleanerSheet {
 
     private void invalidate(String message) {
         rows=Collections.emptyList();display=Collections.emptyList();
-        suggestedCount=0;suggestedBytes=0;filteringSuggestions=false;updateSuggestionButton();
         onlySelected=false;resultQuery="";
         if(resultSearch!=null){
             resultSearch.setText("");resultSearch.setVisibility(View.GONE);
@@ -475,11 +483,15 @@ final class CleanerSheet {
 
     private void updateChoices() {
         pick.setEnabled(!scanning&&!roots.isEmpty());
-        pick.setText(scope==null?"Choose a folder (optional)":"Change folder");
+        scanType.setText(mode.label);scanType.setSelected(true);
+        android.graphics.drawable.Drawable glyph=activity.getDrawable(mode.icon);
+        if(glyph!=null){glyph=glyph.mutate();glyph.setTint(sheet.theme.accent);glyph.setBounds(0,0,dp(17),dp(17));
+            scanType.setCompoundDrawablesRelative(glyph,null,null,null);}
+        scanType.setContentDescription("Scan type: "+mode.label);scanType.setEnabled(!scanning);
+        modeHint.setText(mode.hint);
         scopeLabel.setText(scope!=null?scope:roots.isEmpty()?"No shared storage discovered":
                 "All accessible shared storage · "+TextUtils.join(", ",roots.values()));
-        safeCleanup.setVisibility(mode==Mode.DUPLICATES?View.GONE:View.VISIBLE);
-        safeCleanup.setEnabled(!scanning);
+        scopeLabel.setTooltipText(scopeLabel.getText());
         updateDuplicateChoices();
         configure.setEnabled(!scanning);
         int count=(age>0?1:0)+(size>0?1:0)+(extensions.isEmpty()?0:1)+excluded.size();
@@ -487,15 +499,11 @@ final class CleanerSheet {
         spinner.setVisibility(scanning?View.VISIBLE:View.GONE);
         run.setText(scanning?"Cancel scan":scope==null?"Scan storage":"Scan folder");
         run.setEnabled(scanning||!roots.isEmpty()&&scanner!=null);
-        for(Map.Entry<Mode,Button> item:chips.entrySet()){
-            Button chip=item.getValue();boolean selected=item.getKey()==mode;
-            chip.setSelected(selected);chip.setEnabled(!scanning);
-            chip.setBackground(background(selected?sheet.theme.selected:Color.TRANSPARENT));
-        }
+
     }
 
     private String readyMessage(){
-        return roots.isEmpty()?"No shared storage available. Check Android file access.":"Ready to scan. No files will be changed.";
+        return roots.isEmpty()?"No shared storage available. Check Android file access.":"Ready to scan · No files are changed";
     }
 
     private void reviewCache(){
@@ -661,8 +669,10 @@ final class CleanerSheet {
         path.setPadding(0,dp(5),0,dp(12));details.content.addView(path);
         details.content.addView(details.text(fileSize(row.entry)+"  ·  "+duplicateReason(row),14,details.theme.ink));
         if(row.group!=null)details.content.addView(details.text(row.group+" · Keep at least one verified copy. Nothing is changed here.",13,details.theme.muted));
-        else details.content.addView(details.text(row.suggestedReview?"Suggested to review. This does not mean the file is safe to remove."
-                :"This file was flagged for review, not marked safe to remove.",13,details.theme.muted));
+        else details.content.addView(details.text(mode==Mode.BACKUPS
+                ?"Review only · This may be the only recoverable copy. Confirm that another backup opens before deciding what to keep."
+                :row.suggestedReview?"Likely junk · Check that no app still needs this file. The displayed size isn’t guaranteed free space."
+                :"Review only · These files are outside likely junk and are not counted as possible savings.",13,details.theme.muted));
         DuplicateReview.Group group=row.review;
         if(group!=null&&group.complete&&group.keeper()!=row.member){
             Button keep=button("Keep this copy",R.drawable.ic_check,()->{
@@ -672,20 +682,94 @@ final class CleanerSheet {
             });
             details.content.addView(keep,new LinearLayout.LayoutParams(-1,dp(48)));
         }
+        if(canPreview(row)){
+            Button show=button("Preview file",R.drawable.ic_preview_focus,()->openPreview(row,details));
+            details.content.addView(show,new LinearLayout.LayoutParams(-1,dp(48)));
+        }
         if(reveal!=null){
             details.action("Done",false,false,null);
             details.action("Show in Files",true,false,()->{
-                sheet.dismiss();
-                reveal.accept(row.entry.path());
+                if(mode==Mode.BACKUPS){
+                    if(secondary==details)secondary=null;
+                    reviewBackupLocation(row);
+                }else{
+                    sheet.dismiss();reveal.accept(row.entry.path());
+                }
             });
         }else details.action("Done",true,false,null);
         details.show();
+    }
+
+    private void reviewBackupLocation(Row row){
+        AppSheet confirm=new AppSheet(activity,"Review backup in Files");
+        secondary=confirm;confirm.setOnDismissListener(ignored->{if(secondary==confirm)secondary=null;});
+        confirm.content.addView(confirm.text("This file may be your only recoverable copy. Opening its folder will not change it.",14,confirm.theme.ink));
+        confirm.action("Stay in Cleaner",false,false,null);
+        confirm.action("Open folder",true,false,()->{sheet.dismiss();reveal.accept(row.entry.path());});
+        confirm.show();
+    }
+
+    private boolean canPreview(Row row){
+        return preview!=null&&CleanerPreviewAccess.eligible(row.entry,roots.keySet(),scope,excluded);
+    }
+
+    private void openPreview(Row row,AppSheet detail){
+        if(closed||scanning||previewTask!=null||!canPreview(row)||detail!=secondary||!rows.contains(row))return;
+        int generation=revision;
+        String folder=scope;
+        List<String> exclusions=excluded;
+        List<Object> originalDisplay=display;
+        int position=files.getFirstVisiblePosition();
+        View first=files.getChildAt(0);
+        int top=first==null?0:first.getTop()-files.getPaddingTop();
+        final TextView message=detail==null?null:previewStatus(detail);
+        if(message!=null)message.setText("Checking current file access…");
+        try{
+            previewTask=worker.submit(()->{
+                String checked=null;
+                try{
+                    CleanerScopedWalk.checkpoint(()->closed||revision!=generation);
+                    checked=CleanerPreviewAccess.check(row.entry,row.member,roots.keySet(),folder,exclusions);
+                }catch(Exception unavailable){/* Permission and stale-path failures must not start the viewer. */}
+                String identity=checked;
+                ui.post(()->{
+                    previewTask=null;
+                    if(closed||revision!=generation||secondary!=detail||!sheet.isShowing())return;
+                    if(identity==null){
+                        String note="File changed or can’t be read. Rescan this folder to preview it.";
+                        if(message!=null)message.setText(note);
+                        else android.widget.Toast.makeText(activity,note,android.widget.Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    if(message!=null)detail.content.removeView(message);
+                    if(display!=originalDisplay)return;
+                    preview.open(sheet,row.entry,identity,()->{
+                        if(!closed&&revision==generation&&display==originalDisplay&&sheet.isShowing()&&position<display.size())
+                            files.setSelectionFromTop(position,top);
+                    });
+                });
+            });
+        }catch(java.util.concurrent.RejectedExecutionException busy){
+            if(message!=null)message.setText("File access is busy. Try again.");
+        }
+    }
+
+    private TextView previewStatus(AppSheet details){
+        TextView message=details.content.findViewWithTag("cleanerPreviewStatus");
+        if(message==null){
+            message=details.text("",12,details.theme.muted);
+            message.setTag("cleanerPreviewStatus");
+            message.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            details.content.addView(message);
+        }
+        return message;
     }
 
     private void close() {
         if(closed)return;
         closed=true;revision++;
         if(task!=null){task.cancel(true);task=null;}
+        if(previewTask!=null){previewTask.cancel(true);previewTask=null;}
         worker.shutdownNow();
         if(picker!=null){picker.dismiss();picker=null;}
         if(secondary!=null){secondary.dismiss();secondary=null;}
@@ -722,6 +806,13 @@ final class CleanerSheet {
                 check.setButtonTintList(new ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},
                         new int[]{sheet.theme.accent,sheet.theme.muted}));
                 row.addView(check,new LinearLayout.LayoutParams(dp(48),dp(48)));
+                ImageButton preview=new ImageButton(activity);
+                preview.setImageResource(R.drawable.ic_preview_focus);
+                preview.setFocusable(false);preview.setFocusableInTouchMode(false);
+                preview.setImageTintList(ColorStateList.valueOf(sheet.theme.accent));
+                preview.setPadding(dp(13),dp(13),dp(13),dp(13));
+                preview.setBackground(background(Color.TRANSPARENT));
+                row.addView(preview,new LinearLayout.LayoutParams(dp(48),dp(48)));
             }
             Row entry=(Row)item;
             ((ImageView)row.getChildAt(0)).setImageResource(UiTheme.fileIcon(activity,entry.entry));
@@ -730,7 +821,8 @@ final class CleanerSheet {
             DuplicateReview.Group group=entry.review;
             boolean eligible=group!=null&&group.eligible(entry.member);
             boolean selected=eligible&&group.isSelected(entry.member);
-            String detail=entry.group==null?entry.reason:entry.group+"  ·  "+(entry.suggestedKeep?"Suggested keep":"Other exact copy");
+            String detail=entry.group==null?(entry.suggestedReview?"Likely junk  ·  ":"Review only  ·  ")+entry.reason
+                    :entry.group+"  ·  "+(entry.suggestedKeep?"Suggested keep":"Other exact copy");
             if(group!=null){
                 if(group.keeper()==entry.member)detail=entry.member==group.proof.keep?"Suggested keep":"Keep for this review";
                 else if(entry.member.role==DuplicateFinder.Role.BACKUP_FOLDER)detail="Backup · not selected";
@@ -745,6 +837,11 @@ final class CleanerSheet {
             check.setChecked(selected);check.setVisibility(eligible?View.VISIBLE:View.GONE);
             check.setContentDescription((selected?"Deselect ":"Select ")+entry.entry.name+" for review");
             check.setOnClickListener(v->{if(group!=null&&duplicateReview.matches(group)&&group.toggle(entry.member))duplicateChoicesChanged();});
+            ImageButton show=(ImageButton)row.getChildAt(3);
+            show.setVisibility(canPreview(entry)?View.VISIBLE:View.GONE);
+            show.setContentDescription("Preview "+entry.entry.name);
+            show.setTooltipText("Preview file");
+            show.setOnClickListener(v->openPreview(entry,null));
             row.setBackgroundColor(selected?sheet.theme.selected:Color.TRANSPARENT);
             return row;
         }
