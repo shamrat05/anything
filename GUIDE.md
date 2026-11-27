@@ -64,7 +64,7 @@ scripts/check.sh
 scripts/build.sh :app:assembleFullDebug :app:assembleFullRelease :app:assembleGithubRelease :app:bundlePlayRelease :app:assembleFullDebugAndroidTest :app:lintFullDebug :app:lintGithubRelease :app:lintPlayRelease --console=plain
 ```
 
-Signing material lives outside Git under `~/.local/share/anything-android/`; `release-signing.properties` is ignored. Back up the key privately. GitHub Actions builds four native ABIs with 16 KiB ELF alignment. Without a configured `FASTSEARCH_SIGNING_BUNDLE`, the runner generates a temporary signing key. Such artifacts are for testing, not updates to existing installations. Use the same release signing key for updates. Local Termux builds use installed `aapt2` and a local compiler.
+Signing material lives outside Git under `~/.local/share/anything-android/`; `release-signing.properties` is ignored. Back up the key privately. GitHub Actions builds four native ABIs with 16 KiB ELF alignment. A production workflow requires the original release key. Nonproduction workflows use a temporary release key; those APKs cannot update existing installations. Debug builds and their tests use a separate debug key and package identity. Use the same release signing key for updates. Local Termux builds use installed `aapt2` and a local compiler.
 
 [The workflow](.github/workflows/android.yml) runs host checks, builds the APKs and Play AAB, runs Full/Play lint, validates signatures, permissions, target SDK, bundle structure and native ABIs, then uploads the distribution. It does not run Android instrumentation.
 

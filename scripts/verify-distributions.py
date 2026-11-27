@@ -77,7 +77,6 @@ def native_layout(archive, prefix):
     return details
 
 signatures = {}
-certificate = None
 for name in ['anything-with-sms.apk', 'anything.apk',
              'anything-android-1.0.2-debug.apk', 'anything-android-tests.apk']:
     report = run([sdk_tool('apksigner'), 'verify', '--verbose', '--print-certs', out / name])
@@ -86,10 +85,19 @@ for name in ['anything-with-sms.apk', 'anything.apk',
     if not match:
         raise SystemExit('Missing signer certificate digest: ' + name)
     digest = match.group(1).lower()
-    if certificate is not None and digest != certificate:
-        raise SystemExit('APK signing certificates differ.')
-    certificate = digest
     signatures[name] = digest
+certificate = signatures['anything.apk']
+debug_certificate = signatures['anything-android-1.0.2-debug.apk']
+if signatures['anything-with-sms.apk'] != certificate:
+    raise SystemExit('Release APK signing certificates differ.')
+if signatures['anything-android-tests.apk'] != debug_certificate or debug_certificate == certificate:
+    raise SystemExit('Debug and test signing must match each other and be separate from release signing.')
+debug_badging = run([sdk_tool('aapt2'), 'dump', 'badging', out / 'anything-android-1.0.2-debug.apk'])
+if not re.search(r"^package: name='com[.]callcraftstudio[.]anything[.]debug'", debug_badging, re.MULTILINE):
+    raise SystemExit('Published debug artifact is not isolated from the production package.')
+test_badging = run([sdk_tool('aapt2'), 'dump', 'badging', out / 'anything-android-tests.apk'])
+if not re.search(r"^package: name='com[.]callcraftstudio[.]anything[.]debug[.]test'", test_badging, re.MULTILINE):
+    raise SystemExit('Published test harness is not isolated from the production package.')
 
 permissions = {}
 versions = {}

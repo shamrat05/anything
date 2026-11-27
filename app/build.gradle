@@ -49,7 +49,14 @@ android {
         }
     }
     buildTypes {
-        debug { signingConfig signingConfigs.independent }
+        debug {
+            // A debug APK must never replace an end user's installation, including in release CI.
+            signingConfig signingConfigs.debug
+            if (appId == 'com.callcraftstudio.anything') {
+                applicationIdSuffix '.debug'
+                manifestPlaceholders = [testedApplicationId: appId + '.debug']
+            }
+        }
         release { minifyEnabled false; signingConfig signingConfigs.independent }
     }
 }
