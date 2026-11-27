@@ -82,3 +82,6 @@ java -cp app/build/preview-test-classes dev.fastsearch.android.TarArchiveListing
 
 javac --release 8 -Xlint:all,-options -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/{DexEntryPicker,SmaliExportPlan}.java app/src/test/java/dev/fastsearch/android/DexExportPlanTest.java
 java -cp app/build/preview-test-classes dev.fastsearch.android.DexExportPlanTest
+
+javac --release 8 -Xlint:all,-options -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/ArchiveFolderTree.java app/src/test/java/dev/fastsearch/android/ArchiveFolderTreeTest.java
+java -cp app/build/preview-test-classes dev.fastsearch.android.ArchiveFolderTreeTest

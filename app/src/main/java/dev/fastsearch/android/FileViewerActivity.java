@@ -115,6 +115,17 @@ public final class FileViewerActivity extends Activity {
     private ZoomPreviewView image;
     private ScrollView textScroll;
     private ListView archiveList;
+    private ArchiveFolderTree.Node archiveLocation;
+    private String archiveFolder="";
+    private final java.util.LinkedHashMap<String,int[]> archiveFolderScroll=
+            new java.util.LinkedHashMap<String,int[]>(24,.75f,true){
+        @Override protected boolean removeEldestEntry(java.util.Map.Entry<String,int[]> eldest){return size()>24;}
+    };
+    private android.widget.HorizontalScrollView archiveBreadcrumb;
+    private TextView archiveEmpty;
+    private ImageButton archiveUp;
+    private String archivePartial;
+    private java.util.function.Consumer<ArchiveFolderTree.Node> archiveOpen;
     private SurfaceView surface;
     private MediaPlayer player;
     private MediaController controller;
@@ -224,6 +235,12 @@ public final class FileViewerActivity extends Activity {
             zoom = saved.getFloat("zoom", 1); centerX = saved.getFloat("centerX", .5f); centerY = saved.getFloat("centerY", .5f);
             scrollY = Math.max(0, saved.getInt("scrollY", 0));
             archivePosition = Math.max(0, saved.getInt("archivePosition", 0)); archiveTop = saved.getInt("archiveTop", 0);
+            archiveFolder=saved.getString("archiveFolder","");
+            Bundle folderScroll=saved.getBundle("archiveFolderScroll");
+            if(folderScroll!=null)for(String folder:folderScroll.keySet()){
+                int[] mark=folderScroll.getIntArray(folder);
+                if(mark!=null&&mark.length==2)archiveFolderScroll.put(folder,mark);
+            }
         }
         mime=mimeFor(name);kind=kindFor(name,mime);
         if(saved!=null && saved.getString("readerLanguage")!=null)
@@ -247,7 +264,7 @@ public final class FileViewerActivity extends Activity {
 
     @android.annotation.SuppressLint("GestureBackNavigation")
     @Override public void onBackPressed(){handleBack();}
-    private void handleBack(){if(previewActions!=null&&previewActions.isOpen()){previewActions.stop();return;}if(viewerGuide!=null){stopViewerGuide();return;}if(focusMode){setFocusMode(false);return;}if(session!=null&&!session.selected.isEmpty()){session.selected.clear();updateFileControls();}else finish();}
+    private void handleBack(){if(previewActions!=null&&previewActions.isOpen()){previewActions.stop();return;}if(viewerGuide!=null){stopViewerGuide();return;}if(focusMode){setFocusMode(false);return;}if(session!=null&&!session.selected.isEmpty()){session.selected.clear();updateFileControls();return;}if(archiveLocation!=null&&archiveLocation.parent!=null){moveArchiveFolder(archiveLocation.parent);return;}finish();}
     @Override public boolean dispatchKeyEvent(KeyEvent event){int key=event.getKeyCode();
         if(event.getAction()==KeyEvent.ACTION_DOWN&&event.getRepeatCount()==0&&!selectionBusy&&viewerGuide==null){
             if(key==KeyEvent.KEYCODE_ESCAPE&&focusMode){setFocusMode(false);return true;}
@@ -285,7 +302,7 @@ public final class FileViewerActivity extends Activity {
         FileOperationService.removeListener(viewerTransferListener);stopViewerGuide();thumbnails.pause();
         if(activeSheet!=null&&!sharingArchiveEntry){activeSheet.dismiss();activeSheet=null;}
         rememberFile(); started = false; cancelLoad(); releaseMedia(); clearShown();
-        ((PreviewStage)stage).reset();navigationPlaceholder=loadingPlaceholder=null;stage.removeAllViews();previewContent=null; image = null; textScroll = null; archiveList = null; mediaAnchor = null; surface = null;
+        ((PreviewStage)stage).reset();navigationPlaceholder=loadingPlaceholder=null;stage.removeAllViews();previewContent=null; image = null; textScroll = null; resetArchiveNavigation(); mediaAnchor = null; surface = null;
         if (noisyRegistered) { unregisterReceiver(noisy); noisyRegistered = false; }
         super.onStop();
     }
@@ -324,6 +341,12 @@ public final class FileViewerActivity extends Activity {
         out.putBoolean("completed", mediaCompleted);
         out.putFloat("zoom", zoom); out.putFloat("centerX", centerX); out.putFloat("centerY", centerY);
         out.putInt("scrollY", scrollY); out.putInt("archivePosition", archivePosition); out.putInt("archiveTop", archiveTop);
+        if(!archiveFolder.isEmpty())out.putString("archiveFolder",archiveFolder);
+        if(!archiveFolderScroll.isEmpty()){
+            Bundle marks=new Bundle();
+            for(java.util.Map.Entry<String,int[]> entry:archiveFolderScroll.entrySet())marks.putIntArray(entry.getKey(),entry.getValue());
+            out.putBundle("archiveFolderScroll",marks);
+        }
     }
 
     private void buildUi() {
@@ -573,7 +596,7 @@ public final class FileViewerActivity extends Activity {
             if(kind==Kind.TEXT)format.add(new SpotlightTour.Step("Change syntax colors","Code colors are chosen by filename. Pick another language if a plain text file contains code.",()->previewContent==null?null:previewContent.findViewById(R.id.preview_syntax)));
             format.add(new SpotlightTour.Step("Open the whole document","Large files may show only the first part here. Use More file actions → Open in another app for the full file.",()->moreAction));
         }else if(archiveList!=null){
-            format.add(new SpotlightTour.Step("Browse the ZIP","Tap a supported entry to preview it without extracting the whole archive. Eligible entries can be shared separately.",()->archiveList));
+            format.add(new SpotlightTour.Step("Browse the archive","Open folders, follow the path back, or tap a supported member to preview it without extracting.",()->archiveList));
             if(canExtract()) format.add(new SpotlightTour.Step("Extract into a new folder",
                     "Choose Extract all, then check the destination. Existing files are not replaced.",()->viewerGuideControl(previewContent,"Extract all…")));
         }else if((kind==Kind.STREAM_ARCHIVE || kind==Kind.SEVEN_Z) && canExtract()){
@@ -688,7 +711,7 @@ public final class FileViewerActivity extends Activity {
         if(previewActions!=null)previewActions.stop();
         if(previewSelectionMenu!=null)previewSelectionMenu.dismiss();
         rememberFile();cancelLoad();releaseMedia();clearShown();stateKey=null;restoreOnLoad=true;session.position=position;FileEntry entry=currentEntry();name=entry.name;path=entry.path();size=entry.size;uri=null;
-        readerSource=false;plainTextOverride=false;readerLanguage=null;mime=mimeFor(name);kind=kindFor(name,mime);page=pageCount=mediaPosition=scrollY=archivePosition=archiveTop=0;zoom=1;centerX=centerY=.5f;mediaCompleted=false;playWhenReady=true;
+        readerSource=false;plainTextOverride=false;readerLanguage=null;archiveFolder="";archiveFolderScroll.clear();mime=mimeFor(name);kind=kindFor(name,mime);page=pageCount=mediaPosition=scrollY=archivePosition=archiveTop=0;zoom=1;centerX=centerY=.5f;mediaCompleted=false;playWhenReady=true;
         title.setText(name);details.setText(metadata());updateFileControls();load();}
     private void renameCurrent(){if(selectionBusy||viewerTransfer)return;ensureSession();List<FileEntry> chosen=java.util.Collections.singletonList(currentEntry());
         activeSheet=FileRename.show(this,chosen,session.root,actions,this::finish);}
@@ -854,7 +877,7 @@ public final class FileViewerActivity extends Activity {
 
     private void load() {
         if (!started || destroyed || isFinishing()) return;
-        cancelLoad(); clearShown(); image=null;textScroll=null;archiveList=null;formatGuideTarget=null;mediaLoading=null;
+        cancelLoad(); clearShown(); image=null;textScroll=null;resetArchiveNavigation();formatGuideTarget=null;mediaLoading=null;
         notice.setVisibility(View.GONE);((PreviewStage)stage).reset();stage.removeAllViews();
         stage.setBackgroundColor(stageColor(kind));
         previewContent=new PreviewContent(this);stage.addView(previewContent,new FrameLayout.LayoutParams(-1,-1));
@@ -1692,121 +1715,174 @@ public final class FileViewerActivity extends Activity {
     }
 
     private void showSevenZip(SevenZipArchive.Listing listing) {
-        LinearLayout column = new LinearLayout(this);
-        column.setOrientation(LinearLayout.VERTICAL);
-        TextView intro = text(listing.count == 0 ? "This archive is empty."
-                : listing.count == 1 ? "1 archive entry" : listing.count + " archive entries",15,INK);
-        intro.setPadding(dp(18),dp(12),dp(18),dp(10));
-        column.addView(intro,new LinearLayout.LayoutParams(-1,-2));
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout rows = new LinearLayout(this);
-        rows.setPadding(dp(18),0,dp(18),dp(10));
-        rows.setOrientation(LinearLayout.VERTICAL);
-        for (SevenZipArchive.Entry entry : listing.entries) {
-            TextView line = text(entry.name,14,INK);
-            line.setMaxLines(2);
-            line.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-            line.setPadding(0,dp(9),0,0);
-            if(!entry.directory){
-                line.setMinHeight(dp(48));
-                line.setOnClickListener(v->{
-                    String leaf=entry.name.substring(entry.name.lastIndexOf('/')+1);
-                    long length=Math.max(0,entry.size);
-                    showArchiveMember(leaf,length,(app,channel)->ArchiveEntryFile.write(app,length,
-                            output->SevenZipArchive.copyEntry(channel,entry,output)));
-                });
-            }
-            rows.addView(line,new LinearLayout.LayoutParams(-1,-2));
-            TextView metadata = text(entry.directory ? "Folder" : bytes(Math.max(0,entry.size)),12,MUTED);
-            metadata.setPadding(0,0,0,dp(8));
-            rows.addView(metadata,new LinearLayout.LayoutParams(-1,-2));
-            rows.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
-        }
-        if (listing.entries.size() < listing.count) {
-            TextView more = text("Only the first " + listing.entries.size() + " entries are shown. Extract all includes the rest.",13,MUTED);
-            more.setPadding(0,dp(12),0,dp(6));
-            rows.addView(more,new LinearLayout.LayoutParams(-1,-2));
-        }
-        scroll.addView(rows,new ScrollView.LayoutParams(-1,-2));
-        column.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-        if (canExtract()) showExtractDock(column);
-        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+        ArchiveFolderTree tree=new ArchiveFolderTree();
+        for(SevenZipArchive.Entry entry:listing.entries)
+            tree.add(entry.name,entry.directory,entry,!entry.directory&&entry.size<=ArchiveEntryFile.MAX_BYTES,
+                    bytes(Math.max(0,entry.size)));
+        showArchiveFolders(tree,listing.entries.size()<listing.count
+                ?"Showing "+listing.entries.size()+" of "+listing.count+" archive records.":"",listing.count,node->{
+            SevenZipArchive.Entry entry=(SevenZipArchive.Entry)node.entry;
+            long length=Math.max(0,entry.size);
+            showArchiveMember(node.leaf,length,(app,channel)->ArchiveEntryFile.write(app,length,
+                    output->SevenZipArchive.copyEntry(channel,entry,output)));
+        });
     }
 
     private void showStreamArchive(StreamArchiveExtraction.Format format,TarArchiveListing.Listing listing) {
-        if (format == null) { failure("This archive format could not be identified."); return; }
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(22),dp(20),dp(22),dp(20));
-        body.addView(text(format.label,18,INK));
+        if(format==null){failure("This archive format could not be identified.");return;}
         if(listing==null){
-            body.addView(text("Extracts one file: " + StreamArchiveExtraction.decompressedName(name),14,MUTED));
-        }else{
-            String caption;
-            switch(listing.stop){
-                case COMPLETE: caption=listing.entries.isEmpty()?"This archive is empty."
-                        :listing.entries.size()==1?"1 entry":"Contents · "+listing.entries.size()+" entries";break;
-                case ENTRY_LIMIT:caption="Showing the first "+listing.entries.size()+" entries. More entries may follow.";break;
-                case READ_LIMIT:caption="Partial listing. The preview reached its scan limit.";break;
-                default:caption="Partial listing. An unsupported record needs a dedicated archive app.";
-            }
-            TextView description=text(caption,13,MUTED);
-            description.setPadding(0,dp(4),0,dp(8));
-            body.addView(description);
-            for(TarArchiveListing.Member member:listing.entries){
-                TextView label=text(member.name,14,INK);
-                label.setMaxLines(2);
-                label.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-                label.setPadding(0,dp(8),0,0);
-                if(TarArchiveListing.canPreview(member,format.gzip)
-                        &&(!format.gzip||shown!=null&&shown.size<=TarArchiveListing.MAX_COMPRESSED)){
-                    label.setMinHeight(dp(48));label.setTextColor(theme.accent);
-                    label.setOnClickListener(v->{
-                        String leaf=member.name.substring(member.name.lastIndexOf('/')+1);
-                        showArchiveMember(leaf,member.size,(app,channel)->ArchiveEntryFile.write(app,member.size,
-                                output->TarArchiveListing.copyEntry(channel,format.gzip,member,output)));
-                    });
-                }
-                body.addView(label);
-                TextView details=text(member.special?"Special file · review only"
-                        :member.directory?"Folder":bytes(member.size),12,MUTED);
-                details.setPadding(0,0,0,dp(8));
-                body.addView(details);
-                body.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
-            }
-            String note=listing.specialEntries?"This archive contains links or special files. Use a dedicated archive app."
-                    :shown!=null&&shown.size>ArchiveExtraction.MAX_BYTES?"Archives over 1 GB need a dedicated app to extract."
-                     :"Tap an eligible file to preview it without extracting the archive.";
-            TextView help=text(note,13,MUTED);help.setPadding(0,dp(12),0,0);
-            body.addView(help);
+            LinearLayout column=new LinearLayout(this);column.setOrientation(LinearLayout.VERTICAL);
+            TextView intro=text(format.label+" · Extracts one file: "+StreamArchiveExtraction.decompressedName(name),15,INK);
+            intro.setPadding(dp(20),dp(16),dp(20),dp(10));
+            column.addView(intro,new LinearLayout.LayoutParams(-1,0,1));
+            if(canExtract())showExtractDock(column);
+            previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+            return;
         }
-        scroll.addView(body,new ScrollView.LayoutParams(-1,-2));
-        LinearLayout column = new LinearLayout(this);
-        column.setOrientation(LinearLayout.VERTICAL);
-        column.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-        if(canExtract())showExtractDock(column);
-        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+        ArchiveFolderTree tree=new ArchiveFolderTree();
+        for(TarArchiveListing.Member member:listing.entries){
+            boolean eligible=TarArchiveListing.canPreview(member,format.gzip)
+                    &&(!format.gzip||shown!=null&&shown.size<=TarArchiveListing.MAX_COMPRESSED);
+            tree.add(member.name,member.directory,member,eligible,member.special?"Special file · review only":bytes(member.size));
+        }
+        String partial="";
+        switch(listing.stop){
+            case COMPLETE:break;
+            case ENTRY_LIMIT:partial="Showing the first "+listing.entries.size()+" archive records.";break;
+            case READ_LIMIT:partial="The archive preview reached its scan limit.";break;
+            default:partial="An unsupported record stopped the listing.";
+        }
+        if(listing.specialEntries)partial=joinArchiveNotes(partial,"Links and special files cannot be opened here.");
+        showArchiveFolders(tree,partial,listing.stop==TarArchiveListing.Stop.COMPLETE?listing.entries.size():-1,node->{
+            TarArchiveListing.Member member=(TarArchiveListing.Member)node.entry;
+            showArchiveMember(node.leaf,member.size,(app,channel)->ArchiveEntryFile.write(app,member.size,
+                    output->TarArchiveListing.copyEntry(channel,format.gzip,member,output)));
+        });
     }
 
-    private void showArchive(ZipDirectory.Listing result) {
-        LinearLayout column = new LinearLayout(this);
-        column.setOrientation(LinearLayout.VERTICAL);
-        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
-        if (result.entries.isEmpty() && !result.truncated) {
-            TextView empty = text("This archive is empty.", 14, MUTED); empty.setGravity(Gravity.CENTER); column.addView(empty,new LinearLayout.LayoutParams(-1,0,1));
-        } else {
-            EdgeFastScroll.List entries=new EdgeFastScroll.List(this);
-            entries.labels=p->result.entries.get(p).name;entries.enableReleasePick();archiveList=entries; archiveList.setPadding(dp(12),dp(8),dp(12),dp(8));
-            archiveList.setDivider(new android.graphics.drawable.ColorDrawable(theme.line)); archiveList.setDividerHeight(dp(1));
-            archiveList.setAdapter(new ArchiveAdapter(result.entries));
-            archiveList.setOnItemClickListener((parent, view, position, id) -> showArchiveEntry(result.entries.get(position)));
-            archiveList.setSelectionFromTop(Math.min(archivePosition, Math.max(0, result.entries.size() - 1)), archiveTop);
-            column.addView(archiveList,new LinearLayout.LayoutParams(-1,0,1));
+    private void showArchive(ZipDirectory.Listing listing) {
+        ArchiveFolderTree tree=new ArchiveFolderTree();
+        for(ZipDirectory.Entry entry:listing.entries){
+            boolean eligible=!entry.encrypted&&!entry.special;
+            String detail=bytes(entry.size)+(entry.encrypted?" · encrypted":entry.special?" · special file":"");
+            String exact=entry.rawName;
+            // An archive link written with a trailing slash must not become a directory ancestor.
+            if(entry.directory&&entry.special&&exact!=null&&exact.endsWith("/"))exact=exact.substring(0,exact.length()-1);
+            tree.add(exact,entry.directory&&!entry.special,entry,eligible,detail);
         }
-        details.setText(metadata() + " · " + NumberFormat.getIntegerInstance().format(result.totalEntries) + (result.totalEntries == 1 ? " entry" : " entries"));
-        if (canExtract()) showExtractDock(column);
-        if (result.truncated) note("Showing " + result.entries.size() + " entries within the preview limit. Use Open for the full archive.");
+        showArchiveFolders(tree,listing.truncated
+                ?"Showing "+listing.entries.size()+" of "+listing.totalEntries+" archive records.":"",listing.totalEntries,
+                node->showArchiveEntry((ZipDirectory.Entry)node.entry));
+    }
+
+    private static String joinArchiveNotes(String first,String second){return first.isEmpty()?second:first+" "+second;}
+    private void showArchiveFolders(ArchiveFolderTree tree,String partial,long recordCount,
+                                    java.util.function.Consumer<ArchiveFolderTree.Node> open){
+        archiveOpen=open;
+        archiveLocation=tree.folder(archiveFolder);archiveFolder=archiveLocation.path();
+        archivePartial=partial;
+        if(tree.omitted)archivePartial=joinArchiveNotes(archivePartial,"Unsafe or ambiguous paths were hidden.");
+        if(tree.bounded)archivePartial=joinArchiveNotes(archivePartial,"Some folders exceed the preview limit.");
+        if(recordCount>=0)details.setText(metadata()+" · "+NumberFormat.getIntegerInstance().format(recordCount)
+                +(recordCount==1?" entry":" entries"));
+        LinearLayout column=new LinearLayout(this);column.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout breadcrumbBar=row();
+        archiveUp=actionIcon(R.drawable.ic_back,"Up one archive folder",View.NO_ID);
+        archiveUp.setOnClickListener(v->{if(archiveLocation!=null)moveArchiveFolder(archiveLocation.parent);});
+        breadcrumbBar.addView(archiveUp,new LinearLayout.LayoutParams(dp(48),dp(48)));
+        archiveBreadcrumb=new android.widget.HorizontalScrollView(this){
+            @Override public boolean dispatchTouchEvent(MotionEvent event){
+                if(event.getActionMasked()==MotionEvent.ACTION_DOWN)requestDisallowInterceptTouchEvent(true);
+                return super.dispatchTouchEvent(event);
+            }
+        };
+        archiveBreadcrumb.setHorizontalScrollBarEnabled(false);archiveBreadcrumb.setFillViewport(true);
+        breadcrumbBar.addView(archiveBreadcrumb,new LinearLayout.LayoutParams(0,dp(48),1));
+        column.addView(breadcrumbBar,new LinearLayout.LayoutParams(-1,dp(48)));
+        column.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
+        if(!archivePartial.isEmpty()){
+            TextView limits=text("Partial listing · "+archivePartial,12,MUTED);
+            limits.setPadding(dp(16),dp(6),dp(16),dp(5));
+            column.addView(limits,new LinearLayout.LayoutParams(-1,-2));
+        }
+        FrameLayout body=new FrameLayout(this);
+        EdgeFastScroll.List entries=new EdgeFastScroll.List(this);
+        entries.enableReleasePick();archiveList=entries;
+        archiveList.setPadding(dp(12),dp(3),dp(12),dp(6));
+        archiveList.setDivider(new android.graphics.drawable.ColorDrawable(theme.line));
+        archiveList.setDividerHeight(dp(1));
+        body.addView(archiveList,new FrameLayout.LayoutParams(-1,-1));
+        archiveEmpty=text("",14,MUTED);archiveEmpty.setGravity(Gravity.CENTER);
+        body.addView(archiveEmpty,new FrameLayout.LayoutParams(-1,-1));
+        column.addView(body,new LinearLayout.LayoutParams(-1,0,1));
+        if(canExtract())showExtractDock(column);
+        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+        refreshArchiveFolder();
+    }
+    private void moveArchiveFolder(ArchiveFolderTree.Node target){
+        if(archiveLocation==null||target==null||target==archiveLocation||!target.folder||target.blocked)return;
+        rememberArchiveMark();
+        archiveLocation=target;archiveFolder=target.path();
+        refreshArchiveFolder();
+    }
+    private void rememberArchiveMark(){
+        if(archiveList==null||archiveLocation==null||archiveList.getChildCount()==0)return;
+        View first=archiveList.getChildAt(0);
+        // Accept a visible row only if it was bound to the current adapter's folder.
+        if(first.getTag()!=archiveLocation)return;
+        // Android restores relative to effective list padding, not absolute child top.
+        int offset=first.getTop()-archiveList.getListPaddingTop();
+        archiveFolderScroll.put(archiveFolder,new int[]{archiveList.getFirstVisiblePosition(),offset});
+    }
+    private void resetArchiveNavigation(){
+        archiveList=null;archiveLocation=null;archiveBreadcrumb=null;archiveEmpty=null;archiveUp=null;archiveOpen=null;archivePartial=null;
+    }
+    private void refreshArchiveFolder(){
+        if(archiveLocation==null||archiveList==null)return;
+        EdgeFastScroll.List entries=(EdgeFastScroll.List)archiveList;
+        List<ArchiveFolderTree.Node> rows=archiveLocation.visible();
+        entries.labels=p->p>=0&&p<rows.size()?rows.get(p).leaf:"";
+        archiveList.setAdapter(new ArchiveFolderAdapter(rows));
+        archiveList.setOnItemClickListener((parent,view,position,id)->{
+            if(position<0||position>=rows.size())return;
+            ArchiveFolderTree.Node node=rows.get(position);
+            if(node.folder)moveArchiveFolder(node);
+            else if(node.enabled&&archiveOpen!=null)archiveOpen.accept(node);
+        });
+        int[] mark=archiveFolderScroll.get(archiveFolder);
+        if(mark!=null&&!rows.isEmpty())archiveList.setSelectionFromTop(Math.max(0,Math.min(mark[0],rows.size()-1)),mark[1]);
+        archiveEmpty.setText(!archivePartial.isEmpty()?"No items shown here."
+                :archiveLocation.parent==null?"This archive is empty.":"This folder is empty.");
+        archiveEmpty.setVisibility(rows.isEmpty()?View.VISIBLE:View.GONE);
+        drawArchiveBreadcrumb();
+    }
+    private void drawArchiveBreadcrumb(){
+        archiveBreadcrumb.removeAllViews();
+        LinearLayout trail=row();trail.setGravity(Gravity.CENTER_VERTICAL);trail.setPadding(dp(8),0,dp(8),0);
+        java.util.ArrayDeque<ArchiveFolderTree.Node> hierarchy=new java.util.ArrayDeque<>();
+        for(ArchiveFolderTree.Node node=archiveLocation;node!=null;node=node.parent)hierarchy.addFirst(node);
+        archiveUp.setVisibility(archiveLocation.parent!=null?View.VISIBLE:View.GONE);
+        int index=0;
+        for(ArchiveFolderTree.Node node:hierarchy){
+            if(index++>0){TextView split=text("›",14,MUTED);split.setPadding(dp(3),0,dp(3),0);trail.addView(split);}
+            String label=node.parent==null?"Archive":node.leaf;
+            TextView crumb=text(label,13,node==archiveLocation?INK:theme.accent);
+            crumb.setSingleLine(true);crumb.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            crumb.setMaxWidth(dp(188));crumb.setMinHeight(dp(48));crumb.setGravity(Gravity.CENTER_VERTICAL);
+            crumb.setPadding(dp(8),0,dp(8),0);
+            if(node!=archiveLocation){
+                crumb.setContentDescription(node.parent==null?"Archive root":"Open folder "+label);
+                crumb.setOnClickListener(v->moveArchiveFolder(node));
+            }
+            trail.addView(crumb,new LinearLayout.LayoutParams(-2,dp(48)));
+        }
+        android.widget.HorizontalScrollView target=archiveBreadcrumb;
+        target.addView(trail,new FrameLayout.LayoutParams(-2,-1));
+        target.post(()->{
+            if(archiveBreadcrumb!=target||trail.getParent()!=target)return;
+            int end=Math.max(0,trail.getWidth()-target.getWidth());
+            target.scrollTo(target.getLayoutDirection()==View.LAYOUT_DIRECTION_RTL?0:end,0);
+        });
     }
 
     private void showExtractDock(LinearLayout column) {
@@ -1834,7 +1910,7 @@ public final class FileViewerActivity extends Activity {
         String entryName = entry.name.substring(entry.name.lastIndexOf('/') + 1);
         Kind format = kindFor(entryName, mimeFor(entryName));
         if (format == Kind.AUDIO || format == Kind.VIDEO || format == Kind.OFFICE
-                || format == Kind.ZIP || format == Kind.SEVEN_Z) {
+                || format == Kind.ZIP || format == Kind.SEVEN_Z || format == Kind.STREAM_ARCHIVE) {
             openArchivePreview(entry,entryName);
             return;
         }
@@ -2192,6 +2268,51 @@ public final class FileViewerActivity extends Activity {
         }
     }
 
+    private final class ArchiveFolderAdapter extends BaseAdapter {
+        private final List<ArchiveFolderTree.Node> entries;
+        ArchiveFolderAdapter(List<ArchiveFolderTree.Node> entries){this.entries=entries;}
+        @Override public int getCount(){return entries.size();}
+        @Override public ArchiveFolderTree.Node getItem(int position){return entries.get(position);}
+        @Override public long getItemId(int position){return position;}
+        @Override public boolean areAllItemsEnabled(){return false;}
+        @Override public boolean isEnabled(int position){return getItem(position).folder||getItem(position).enabled;}
+        @Override public View getView(int position,View recycled,ViewGroup parent){
+            LinearLayout item;
+            if(recycled instanceof LinearLayout)item=(LinearLayout)recycled;
+            else{
+                item=row();item.setGravity(Gravity.CENTER_VERTICAL);
+                item.setMinimumHeight(dp(55));item.setPadding(dp(7),dp(5),dp(7),dp(5));
+                android.graphics.drawable.StateListDrawable press=new android.graphics.drawable.StateListDrawable();
+                press.addState(new int[]{android.R.attr.state_pressed},AppSheet.shape(theme.selected,dp(8)));
+                press.addState(new int[0],new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+                item.setBackground(press);
+                ImageView icon=new ImageView(FileViewerActivity.this);
+                icon.setPadding(dp(9),dp(9),dp(9),dp(9));icon.setBackground(AppSheet.shape(theme.selected,dp(12)));
+                item.addView(icon,new LinearLayout.LayoutParams(dp(40),dp(40)));
+                LinearLayout labels=new LinearLayout(FileViewerActivity.this);
+                labels.setPaddingRelative(dp(10),0,dp(6),0);labels.setOrientation(LinearLayout.VERTICAL);
+                TextView title=text("",14,INK);title.setSingleLine(true);title.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                labels.addView(title);labels.addView(text("",11,MUTED));
+                item.addView(labels,new LinearLayout.LayoutParams(0,-2,1));
+                ImageView next=new ImageView(FileViewerActivity.this);next.setImageResource(R.drawable.ic_chevron_right);
+                next.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                next.setImageTintList(ColorStateList.valueOf(MUTED));item.addView(next,new LinearLayout.LayoutParams(dp(18),dp(18)));
+            }
+            ArchiveFolderTree.Node node=getItem(position);
+            item.setTag(node.parent);
+            ImageView icon=(ImageView)item.getChildAt(0);
+            FileEntry entry=new FileEntry(node.leaf,node.folder,0,0);
+            icon.setImageResource(UiTheme.fileIcon(FileViewerActivity.this,entry));
+            icon.setImageTintList(UiTheme.fileTint(FileViewerActivity.this,FileTypes.category(entry)));
+            LinearLayout labels=(LinearLayout)item.getChildAt(1);
+            ((TextView)labels.getChildAt(0)).setText(node.leaf);
+            ((TextView)labels.getChildAt(1)).setText(node.folder?"Folder":
+                    joinArchiveNotes(node.detail,node.enabled?"":"· Preview unavailable"));
+            item.getChildAt(2).setVisibility(isEnabled(position)?View.VISIBLE:View.INVISIBLE);
+            return item;
+        }
+    }
+
     private final class ArchiveAdapter extends BaseAdapter {
         private final List<ZipDirectory.Entry> entries;
         private final boolean packageContents;
@@ -2242,6 +2363,7 @@ public final class FileViewerActivity extends Activity {
     private void rememberView() {
         if (image != null) { float[] state = image.state(); zoom = state[0]; centerX = state[1]; centerY = state[2]; }
         if (textScroll != null) scrollY = textScroll.getScrollY();
+        rememberArchiveMark();
         if (archiveList != null) {
             archivePosition = archiveList.getFirstVisiblePosition(); View first = archiveList.getChildAt(0); archiveTop = first == null ? 0 : first.getTop();
         }
