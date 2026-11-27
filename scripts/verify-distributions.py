@@ -112,8 +112,8 @@ for name, sms in [('anything-with-sms.apk', True), ('anything.apk', False)]:
         raise SystemExit('Required core permission missing: ' + name)
     if {'android.permission.QUERY_ALL_PACKAGES', 'android.permission.INTERNET', 'android.permission.INSTALL_PACKAGES'} & values:
         raise SystemExit('Unexpected broad package or network permission: ' + name)
-    if installer_permission not in values:
-        raise SystemExit('Missing user-confirmed APK installer permission: ' + name)
+    if installer_permission in values:
+        raise SystemExit('This release must not request the APK installer permission: ' + name)
     permissions[name] = sorted(values)
     with zipfile.ZipFile(out / name) as apk:
         if 'assets/licenses/Inter-OFL.txt' not in apk.namelist():
@@ -135,8 +135,8 @@ bundle_identity = (parsed.get('package'), parsed.get(android + 'versionCode'), p
 if bundle_identity != expected_identity:
     raise SystemExit(f'Wrong Play bundle package/version: expected {expected_identity}, got {bundle_identity}')
 aab_permissions = {item.get(android + 'name') for item in parsed.findall('uses-permission')}
-if aab_permissions != (set(permissions['anything.apk']) - {installer_permission}):
-    raise SystemExit('Play bundle and GitHub APK permissions differ beyond the intentionally excluded installer permission.')
+if aab_permissions != set(permissions['anything.apk']):
+    raise SystemExit('Play bundle and standard GitHub APK permissions must match.')
 if any(item.get(android + 'name', '').endswith('.ApkInstallProvider')
        for item in parsed.findall('application/provider')):
     raise SystemExit('Play bundle must not expose the GitHub installer provider.')

@@ -71,6 +71,7 @@ final class PreviewUiFixtures {
             out.putNextEntry(new ZipEntry("folder/")); out.closeEntry();
             out.putNextEntry(new ZipEntry("folder/snow 雪.txt")); out.write(new byte[1024 * 1024]); out.closeEntry();
             out.putNextEntry(new ZipEntry("../labels-only\nentry.txt")); out.write("Archived note streamed from ZIP.".getBytes(java.nio.charset.StandardCharsets.UTF_8)); out.closeEntry();
+            out.putNextEntry(new ZipEntry("folder/safe-note.txt")); out.write("Archived note streamed from ZIP.".getBytes(java.nio.charset.StandardCharsets.UTF_8)); out.closeEntry();
             out.putNextEntry(new ZipEntry("folder/embedded.pdf"));
             try (FileInputStream input = new FileInputStream(pdf)) {
                 byte[] bytes = new byte[4096];

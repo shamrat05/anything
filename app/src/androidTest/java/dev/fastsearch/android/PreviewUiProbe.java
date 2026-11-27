@@ -75,8 +75,10 @@ public final class PreviewUiProbe extends Instrumentation {
             tracker = new Tracker(); application.registerActivityLifecycleCallbacks(tracker);
             fixtures();if(arguments!=null&&"archive".equals(arguments.getString("phase"))){archive();collectActivities();passed=true;}
             else if(arguments!=null&&"archiveNested".equals(arguments.getString("phase"))){nestedArchive();passed=true;}
+            else if(arguments!=null&&"archiveFolders".equals(arguments.getString("phase"))){archiveFolders();passed=true;}
             else if(arguments!=null&&"extract".equals(arguments.getString("phase"))){extractArchive();passed=true;}
             else if(arguments!=null&&"streamExtract".equals(arguments.getString("phase"))){extractStreamArchives();passed=true;}
+            else if(arguments!=null&&"tarMembers".equals(arguments.getString("phase"))){previewTarMembers();passed=true;}
             else if(arguments!=null&&"sevenZip".equals(arguments.getString("phase"))){extractSevenZip();passed=true;}
             else if(arguments!=null&&"apk".equals(arguments.getString("phase"))){apkActions();passed=true;}
             else if(arguments!=null&&"apkContents".equals(arguments.getString("phase"))){apkContents();passed=true;}
@@ -444,6 +446,9 @@ public final class PreviewUiProbe extends Instrumentation {
         await(() -> Math.abs(snapshot(rotated).scroll - saved) < 40, 4000, "text scroll restores after layout"); close(rotated);
     }
     private void dragToZipPdf(FileViewerActivity activity) {
+        chooseArchiveRow(activity,"folder",true);
+        await(()->archiveFolderPath(activity).equals("folder"),5000,"ZIP gesture folder opens");
+        waitForIdleSync();
         int[][] centers=new int[2][];
         View[] pdf=new View[1];
         main(() -> {
@@ -452,7 +457,7 @@ public final class PreviewUiProbe extends Instrumentation {
             for(int i=0;i<entries.getChildCount();i++){
                 View row=entries.getChildAt(i);
                 TextView label=(TextView)((LinearLayout)((LinearLayout)row).getChildAt(1)).getChildAt(0);
-                if("folder/embedded.pdf".contentEquals(label.getText()))pdf[0]=row;
+                if("embedded.pdf".contentEquals(label.getText()))pdf[0]=row;
                 else if(first==null&&entries.getAdapter().isEnabled(entries.getFirstVisiblePosition()+i))first=row;
             }
             check(first!=null&&pdf[0]!=null,"ZIP entry choices visible before drag");
@@ -478,7 +483,7 @@ public final class PreviewUiProbe extends Instrumentation {
     }
     private void archive() throws Exception {
         FileViewerActivity activity = open(archiveUri, "entries.zip");
-        main(() -> { ListView list = find(content(activity), ListView.class); check(list != null && list.getCount() == 4, "ZIP rows show entry metadata"); });
+        main(() -> { ListView list = find(content(activity), ListView.class); check(list != null && list.getCount() == 1, "ZIP root shows its folder and hides unsafe records"); });
         ActivityMonitor chooser = addMonitor(new android.content.IntentFilter(Intent.ACTION_CHOOSER),
                 new ActivityResult(Activity.RESULT_CANCELED, null), true);
         try {
@@ -504,7 +509,7 @@ public final class PreviewUiProbe extends Instrumentation {
             main(() -> ((AppSheet) field(activity, "activeSheet")).dismiss());
             archiveShareBytes();
         } finally { removeMonitor(chooser); }
-        clickAccessible(ZipDirectory.safeLabel("../labels-only\nentry.txt"));
+        chooseArchiveRow(activity,"safe-note.txt",false);
         await(() -> {
             java.util.concurrent.atomic.AtomicBoolean visible = new java.util.concurrent.atomic.AtomicBoolean();
             main(() -> {
@@ -521,7 +526,7 @@ public final class PreviewUiProbe extends Instrumentation {
         main(() -> ((AppSheet) field(activity, "activeSheet")).dismiss());
         check(!new File(fixture, "folder").exists(), "ZIP entries were not extracted"); capture(activity, "06-archive");
         FileViewerActivity rotated = rotate(activity); assertStopped(activity);
-        main(() -> { ListView list = find(content(rotated), ListView.class); check(list != null && list.getCount() == 4, "ZIP listing survives rotation"); }); close(rotated);
+        main(() -> { ListView list = find(content(rotated), ListView.class); check(list != null && list.getCount() == 3, "ZIP selected folder survives rotation"); }); close(rotated);
     }
 
     private void nestedArchive()throws Exception{
@@ -586,21 +591,99 @@ public final class PreviewUiProbe extends Instrumentation {
     }
 
     private FileViewerActivity openNestedEntry(FileViewerActivity parent,String entry){
+        String[] parts=entry.split("/");
+        for(int i=0;i<parts.length-1;i++)chooseArchiveRow(parent,parts[i],true);
         ActivityMonitor monitor=addMonitor(FileViewerActivity.class.getName(),null,false);
         try{
-            main(()->{
-                ListView list=(ListView)field(parent,"archiveList");
-                for(int i=0;i<list.getCount();i++){
-                    ZipDirectory.Entry row=(ZipDirectory.Entry)list.getAdapter().getItem(i);
-                    if(entry.equals(row.name)){list.performItemClick(null,i,i);return;}
-                }
-                throw new AssertionError("Missing entry: "+entry);
-            });
+            chooseArchiveRow(parent,parts[parts.length-1],false);
             FileViewerActivity child=(FileViewerActivity)waitForMonitorWithTimeout(monitor,15000);
             check(child!=null&&child!=parent,"opened "+entry+" inside Anything");
             await(()->snapshot(child).ready,15000,"nested reader ready for "+entry);
             return child;
         }finally{removeMonitor(monitor);}
+    }
+    private String archiveFolderPath(FileViewerActivity viewer){
+        AtomicReference<String> current=new AtomicReference<>();
+        main(()->current.set((String)field(viewer,"archiveFolder")));
+        return current.get();
+    }
+    private void chooseArchiveRow(FileViewerActivity parent,String name,boolean directory){
+        main(()->{
+            ListView list=(ListView)field(parent,"archiveList");
+            for(int i=0;i<list.getCount();i++){
+                ArchiveFolderTree.Node row=(ArchiveFolderTree.Node)list.getAdapter().getItem(i);
+                if(name.equals(row.leaf)&&directory==row.folder){
+                    check(list.getAdapter().isEnabled(i)&&list.performItemClick(null,i,i),"activate archive row "+name);
+                    return;
+                }
+            }
+            throw new AssertionError("Missing archive row: "+name);
+        });
+    }
+    private int[] archiveViewport(FileViewerActivity activity){
+        int[] position={-1,Integer.MIN_VALUE};
+        main(()->{
+            ListView list=(ListView)field(activity,"archiveList");
+            if(list!=null&&list.getChildCount()>0){
+                position[0]=list.getFirstVisiblePosition();
+                position[1]=list.getChildAt(0).getTop()-list.getListPaddingTop();
+            }
+        });
+        return position;
+    }
+    private void archiveFolders() throws Exception {
+        File file=new File(fixture,"virtual-folders.zip");
+        java.util.Map<String,byte[]> entries=new java.util.LinkedHashMap<>();
+        entries.put("A/Empty/",new byte[0]);
+        entries.put("A/B/C/inside.zip",archiveFixture(java.util.Collections.singletonMap("one/two/readme.txt",
+                "private nested data".getBytes(java.nio.charset.StandardCharsets.UTF_8))));
+        entries.put("../unsafe.txt",new byte[0]);
+        entries.put("a/../also-unsafe.txt",new byte[0]);
+        for(int i=0;i<120;i++)entries.put(String.format(java.util.Locale.ROOT,"A/%03d.txt",i),new byte[0]);
+        java.nio.file.Files.write(file.toPath(),archiveFixture(entries));
+        FileViewerActivity top=open(issue(file),file.getName());
+        main(()->{
+            ListView list=(ListView)field(top,"archiveList");
+            check(list.getCount()==1&&containsVisibleTextFragment(content(top),"Unsafe or ambiguous paths were hidden"),
+                    "root shows direct folders and warns about hidden invalid paths");
+        });
+        chooseArchiveRow(top,"A",true);
+        main(()->((ListView)field(top,"archiveList")).setSelectionFromTop(47,0));
+        int[] expectedMark={47,0};
+        await(()->java.util.Arrays.equals(archiveViewport(top),expectedMark),5000,"scroll deep into A");
+        chooseArchiveRow(top,"B",true);
+        AtomicReference<int[]> mark=new AtomicReference<>();
+        main(()->mark.set((int[])((java.util.Map<?,?>)field(top,"archiveFolderScroll")).get("A")));
+        check(java.util.Arrays.equals(mark.get(),expectedMark),"save A at row 47 and offset 0; got "+java.util.Arrays.toString(mark.get()));
+        chooseArchiveRow(top,"C",true);
+        check("A/B/C".equals(archiveFolderPath(top)),"three levels of folders");
+        FileViewerActivity nested=openNestedEntry(top,"inside.zip");
+        Uri privateSource=nested.getIntent().getData();
+        check(ArchivePreviewSources.depth(privateSource)==1,"nested archive retains a private source");
+        chooseArchiveRow(nested,"one",true);chooseArchiveRow(nested,"two",true);
+        check("one/two".equals(archiveFolderPath(nested)),"inner archive has independent navigation");
+        close(nested);
+        check(!sourceStillOpen(privateSource),"closing nested archive releases its private source");
+        await(()->snapshot(top).ready,15000,"parent viewer returns after nested archive");
+        check("A/B/C".equals(archiveFolderPath(top)),"parent folder survives opening a nested archive");
+        main(top::onBackPressed);
+        check("A/B".equals(archiveFolderPath(top)),"Android Back goes up one folder");
+        main(top::onBackPressed);
+        check("A".equals(archiveFolderPath(top)),"second Back goes up one more folder");
+        try{
+            await(()->java.util.Arrays.equals(archiveViewport(top),expectedMark),5000,"restore exact row and offset in A");
+        }catch(AssertionError failure){
+            throw new AssertionError(failure.getMessage()+"; expected="+java.util.Arrays.toString(expectedMark)
+                    +"; actual="+java.util.Arrays.toString(archiveViewport(top)),failure);
+        }
+        chooseArchiveRow(top,"Empty",true);
+        main(()->check(((ListView)field(top,"archiveList")).getCount()==0,"explicit empty directory is navigable"));
+        main(()->{
+            TextView root=exactText(content(top),"Archive");
+            check(root!=null&&root.performClick(),"breadcrumb jumps to archive root");
+        });
+        check(archiveFolderPath(top).isEmpty()&&!new File(fixture,"A").exists(),"no files were extracted");
+        close(top);
     }
 
     private boolean sourceStillOpen(Uri uri){
@@ -695,23 +778,16 @@ public final class PreviewUiProbe extends Instrumentation {
             check(list.count==5&&list.entries.stream().anyMatch(item->item.name.equals("docs/雪.txt")),
                     "viewer lists the independently produced archive directory");
         });
-        ActivityMonitor member=addMonitor(FileViewerActivity.class.getName(),null,false);
-        try{
-            main(()->{
-                TextView row=exactText(content(activity),"docs/雪.txt");
-                check(row!=null&&row.isClickable()&&row.performClick(),"activate 7z member");
-            });
-            FileViewerActivity child=(FileViewerActivity)waitForMonitorWithTimeout(member,15000);
-            check(child!=null&&child!=activity,"selected 7z member opens inside Anything");
-            await(()->snapshot(child).ready,15000,"7z member text ready");
-            main(()->{
-                PreviewText.Result text=(PreviewText.Result)field(field(child,"shown"),"text");
-                check(text!=null&&text.text.contains("Note from a synthetic 7z fixture"),"7z member bytes rendered without extraction");
-            });
-            Uri childUri=child.getIntent().getData();
-            close(child);
-            check(!sourceStillOpen(childUri)&&!destination.exists(),"closing 7z preview releases source without extracting");
-        }finally{removeMonitor(member);}
+        FileViewerActivity child=openNestedEntry(activity,"docs/雪.txt");
+        main(()->{
+            PreviewText.Result text=(PreviewText.Result)field(field(child,"shown"),"text");
+            check(text!=null&&text.text.contains("Note from a synthetic 7z fixture"),"7z member bytes rendered without extraction");
+        });
+        Uri childUri=child.getIntent().getData();
+        close(child);
+        check(!sourceStillOpen(childUri)&&!destination.exists(),"closing 7z preview releases source without extracting");
+        await(()->snapshot(activity).ready,15000,"7z parent ready after member preview");
+        check("docs".equals(archiveFolderPath(activity)),"7z retains its folder on returning from the member");
         click(activity,"Extract all…");
         setExtractDestination(activity);
         confirmExtraction(activity);
@@ -722,6 +798,48 @@ public final class PreviewUiProbe extends Instrumentation {
         close(activity);
         ArchiveExtraction.removeStaging(destination.toPath());
         check(fixtureDescriptors()==0,"7z viewer and extraction close their descriptors");
+    }
+
+    private void previewTarMembers() throws Exception {
+        byte[] doc=archiveFixture(java.util.Collections.singletonMap("word/document.xml",
+                ("<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
+                +"<w:body><w:p><w:r><w:t>Owned TAR member document</w:t></w:r></w:p></w:body></w:document>")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        byte[] wav=java.nio.file.Files.readAllBytes(new File(fixture,"silent.wav").toPath());
+        for(String suffix:new String[]{".tar",".tar.gz",".tgz"}){
+            File archive=new File(fixture,"member-test"+suffix);
+            try(java.io.OutputStream raw=new FileOutputStream(archive);
+                java.io.OutputStream out=suffix.equals(".tar")?raw:new java.util.zip.GZIPOutputStream(raw)){
+                writeTestTarRecord(out,"./",new byte[0],(byte)'5');
+                writeTestTarRecord(out,"./Documents/Deep/member.docx",doc);
+                writeTestTar(out,"./Media/Deep/member.wav",wav);
+            }
+            FileViewerActivity parent=open(issue(archive),archive.getName());
+            File destination=new File(fixture,"member-test");
+            check(!destination.exists(),"opening "+suffix+" does not extract");
+            FileViewerActivity word=openNestedEntry(parent,"Documents/Deep/member.docx");
+            Uri wordUri=word.getIntent().getData();
+            check(ArchivePreviewSources.depth(wordUri)==1,"archive document has a bounded private source");
+            main(()->{
+                OfficePreview.Result rendered=(OfficePreview.Result)field(field(word,"shown"),"office");
+                check(rendered!=null&&!rendered.sections.isEmpty()
+                        &&rendered.sections.get(0).text.contains("Owned TAR member document"),
+                        "ordinary Office viewer renders the "+suffix+" member");
+            });
+            close(word);
+            check(!sourceStillOpen(wordUri),"Back releases the private document source");
+            await(()->snapshot(parent).ready,15000,"Back restores the TAR listing");
+            check("Documents/Deep".equals(archiveFolderPath(parent)),"TAR returns to the exact folder");
+            main(parent::onBackPressed);main(parent::onBackPressed);
+            FileViewerActivity audio=openNestedEntry(parent,"Media/Deep/member.wav");
+            Uri audioUri=audio.getIntent().getData();
+            await(()->snapshot(audio).prepared,15000,"ordinary media player prepares the "+suffix+" member");
+            close(audio);
+            check(!sourceStillOpen(audioUri),"Back releases the private audio source");
+            close(parent);
+            check(archive.isFile()&&!destination.exists(),"member previews do not extract to the user's folder");
+        }
+        check(fixtureDescriptors()==0,"TAR member preview closes fixture descriptors");
     }
 
     private void extractStreamArchives() throws Exception {
@@ -777,12 +895,15 @@ public final class PreviewUiProbe extends Instrumentation {
     }
 
     private static void writeTestTarRecord(java.io.OutputStream output,String name,byte[] content) throws IOException {
+        writeTestTarRecord(output,name,content,(byte)'0');
+    }
+    private static void writeTestTarRecord(java.io.OutputStream output,String name,byte[] content,byte type) throws IOException {
         byte[] header = new byte[512];
         putTestTar(header,0,name);
         putTestTar(header,100,"0000644");
         putTestTar(header,124,String.format(java.util.Locale.ROOT,"%011o",content.length));
         java.util.Arrays.fill(header,148,156,(byte)' ');
-        header[156]='0';
+        header[156]=type;
         putTestTar(header,257,"ustar\00000");
         int checksum=0;
         for(byte value:header)checksum+=value&255;
