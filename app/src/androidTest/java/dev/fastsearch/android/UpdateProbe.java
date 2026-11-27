@@ -17,10 +17,10 @@ import java.util.function.BooleanSupplier;
 
 /** Offline add/change/delete, no-op reuse and cancelled transaction tests on isolated caches. */
 public final class UpdateProbe extends Instrumentation {
-    private boolean includeRoot=true,folderSnapshots;private Activity foreground;private Context target;private File fixture;private String id;private FileIndex index;private int assertions;
+    private boolean includeRoot=true,folderSnapshots,liveOnly;private Activity foreground;private Context target;private File fixture;private String id;private FileIndex index;private int assertions;
     private final List<String> ids=new ArrayList<>();private final StringBuilder report=new StringBuilder();
-    @Override public void onCreate(Bundle args){super.onCreate(args);includeRoot=args==null||!"false".equals(args.getString("root"));start();}
-    @Override public void onStart(){boolean passed=false;try{target=getTargetContext();foreground=startActivitySync(new android.content.Intent(target,MainActivity.class).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("permissionProbe",true));exercise(false);folderSnapshots=true;exercise(false);folderSafety();folderSnapshots=false;if(includeRoot)exercise(true);discovery(false);if(includeRoot)discovery(true);passed=true;}
+    @Override public void onCreate(Bundle args){super.onCreate(args);includeRoot=args==null||!"false".equals(args.getString("root"));liveOnly=args!=null&&"live".equals(args.getString("phase"));start();}
+    @Override public void onStart(){boolean passed=false;try{target=getTargetContext();foreground=startActivitySync(new android.content.Intent(target,MainActivity.class).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("permissionProbe",true));if(!liveOnly){exercise(false);folderSnapshots=true;exercise(false);folderSafety();folderSnapshots=false;if(includeRoot)exercise(true);}discovery(false);if(includeRoot)discovery(true);passed=true;}
         catch(Throwable failure){java.io.StringWriter trace=new java.io.StringWriter();failure.printStackTrace(new java.io.PrintWriter(trace));report.append(trace);}
         finally{try{cleanup();}catch(Exception failure){passed=false;report.append("Cleanup: ").append(failure);}}
         Bundle result=new Bundle();result.putBoolean("passed",passed);result.putInt("assertions",assertions);
@@ -119,6 +119,33 @@ public final class UpdateProbe extends Instrumentation {
         check(!index.getState().scanning&&index.wholeReconcileStartsForProbe()==whole&&index.fullScanStartsForProbe()==full,"foreground discovery does not rebuild or check whole index");
         List<FileEntry> unchanged=index.getState().entries;SystemClock.sleep(550);index.discoverOnOpen(folder.getPath());
         await(()->!index.hasPendingWork(),"unchanged discovery settles");check(index.getState().entries==unchanged,"unchanged native discovery retains snapshot");
+        // Simulate devices whose FUSE mount does not propagate the other writer's watch
+        // events. This calls the exact foreground poll used by the Activity.
+        File elsewhere=new File(fixture,"elsewhere");
+        check(elsewhere.mkdir(),"create outside-common destination");
+        check(fixture.setLastModified(System.currentTimeMillis()+3000),"set changed root stamp");
+        index.discoverOnOpen(fixture.getPath());
+        await(()->!index.hasPendingWork()&&find(elsewhere)!=null,"index new move destination");
+        check(index.getState().watchCount==0,"tests use foreground discovery without FileObserver");
+        String foreground=folder.getPath();
+        index.probeForegroundChanges(foreground);
+        await(()->!index.hasPendingWork(),"foreground stamp baseline");
+        File created=new File(folder,"fresh.txt"),renamed=new File(folder,"renamed-fresh.txt");
+        File moved=new File(elsewhere,"moved-fresh.txt");
+        long stamp=System.currentTimeMillis()+10_000;
+        write(created,"fresh");check(folder.setLastModified(stamp),"changed source stamp");
+        long createMs=awaitForeground(foreground,()->find(created)!=null,"external create");
+        check(created.renameTo(renamed)&&folder.setLastModified(stamp+2000),"external rename");
+        long renameMs=awaitForeground(foreground,()->find(created)==null&&find(renamed)!=null,"external rename");
+        check(renamed.renameTo(moved)&&folder.setLastModified(stamp+4000)
+                &&elsewhere.setLastModified(stamp+4000),"external move");
+        long moveMs=awaitForeground(elsewhere.getPath(),()->find(renamed)==null&&find(moved)!=null,"external move");
+        check(moved.delete()&&elsewhere.setLastModified(stamp+6000),"external delete");
+        long deleteMs=awaitForeground(elsewhere.getPath(),()->find(moved)==null,"external delete");
+        check(index.fullScanStartsForProbe()==full&&index.wholeReconcileStartsForProbe()==whole,
+                "foreground create, rename, move and delete never reconcile the whole index");
+        report.append("Foreground create/rename/move/delete (ms): ")
+                .append(createMs).append('/').append(renameMs).append('/').append(moveMs).append('/').append(deleteMs).append('\n');
         index.setProbeLiveWatching(true);index.refresh();await(()->!index.hasPendingWork(),"enable live watches");
         check(index.getState().watchCount>0,"shared and root mode request live watches");
         File live=new File(folder,"live.txt");start=SystemClock.elapsedRealtime();write(live,"live");
@@ -126,6 +153,18 @@ public final class UpdateProbe extends Instrumentation {
         check(live.delete(),"delete live fixture");await(()->find(live)==null,"live deletion reaches index");
         report.append(root?"Root ":"Shared ").append("native foreground discovery ").append(latency).append("ms; live event ").append(liveLatency).append("ms\n");
         close();delete(fixture);fixture=null;
+    }
+    private long awaitForeground(String folder,BooleanSupplier condition,String label)throws Exception{
+        long start=SystemClock.elapsedRealtime();
+        for(int i=0;i<12;i++){
+            index.probeForegroundChanges(folder);
+            long deadline=SystemClock.elapsedRealtime()+150;
+            while(SystemClock.elapsedRealtime()<deadline){
+                if(condition.getAsBoolean()&&!index.hasPendingWork())return SystemClock.elapsedRealtime()-start;
+                SystemClock.sleep(10);
+            }
+        }
+        throw new AssertionError("Foreground check timed out: "+label);
     }
     private FileIndex open(boolean root)throws Exception{FileIndex opened=FileIndex.forProbe(target,fixture,id);opened.setProbeLiveWatching(false);opened.setProbeFolderSnapshots(folderSnapshots);opened.setRootEnabled(root);return opened;}
     private FileEntry find(File file){String path=file.getAbsolutePath();for(FileEntry entry:index.getState().entries)if(entry.path().equals(path))return entry;return null;}

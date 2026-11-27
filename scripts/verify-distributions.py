@@ -78,8 +78,8 @@ def native_layout(archive, prefix):
 
 signatures = {}
 certificate = None
-for name in ['anything-android-1.0.1.apk', 'anything-play-1.0.1.apk',
-             'anything-android-1.0.1-debug.apk', 'anything-android-tests.apk']:
+for name in ['anything-with-sms.apk', 'anything.apk',
+             'anything-android-1.0.2-debug.apk', 'anything-android-tests.apk']:
     report = run([sdk_tool('apksigner'), 'verify', '--verbose', '--print-certs', out / name])
     (out / (name + '.signature.txt')).write_text(report)
     match = re.search(r'Signer #1 certificate SHA-256 digest: ([0-9a-fA-F]+)', report)
@@ -93,9 +93,10 @@ for name in ['anything-android-1.0.1.apk', 'anything-play-1.0.1.apk',
 
 permissions = {}
 versions = {}
+installer_permission = 'android.permission.REQUEST_INSTALL_PACKAGES'
 funding_assets = {'support-on-patreon.svg', 'anything-usdt-tron-qr.svg'}
-expected_identity = ('com.callcraftstudio.anything', release_version_code(), '1.0.1')
-for name, sms in [('anything-android-1.0.1.apk', True), ('anything-play-1.0.1.apk', False)]:
+expected_identity = ('com.callcraftstudio.anything', release_version_code(), '1.0.2')
+for name, sms in [('anything-with-sms.apk', True), ('anything.apk', False)]:
     badging = run([sdk_tool('aapt2'), 'dump', 'badging', out / name])
     identity = re.search(r"package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", badging)
     if not identity or identity.groups() != expected_identity:
@@ -109,14 +110,18 @@ for name, sms in [('anything-android-1.0.1.apk', True), ('anything-play-1.0.1.ap
         raise SystemExit('Wrong SMS permission distribution: ' + name)
     if not {'android.permission.READ_CONTACTS', 'android.permission.MANAGE_EXTERNAL_STORAGE'} <= values:
         raise SystemExit('Required core permission missing: ' + name)
-    if {'android.permission.QUERY_ALL_PACKAGES', 'android.permission.INTERNET'} & values:
+    if {'android.permission.QUERY_ALL_PACKAGES', 'android.permission.INTERNET', 'android.permission.INSTALL_PACKAGES'} & values:
         raise SystemExit('Unexpected broad package or network permission: ' + name)
+    if installer_permission not in values:
+        raise SystemExit('Missing user-confirmed APK installer permission: ' + name)
     permissions[name] = sorted(values)
     with zipfile.ZipFile(out / name) as apk:
+        if 'assets/licenses/Inter-OFL.txt' not in apk.namelist():
+            raise SystemExit('Inter license missing: ' + name)
         if not {'assets/' + item for item in funding_assets} <= set(apk.namelist()):
             raise SystemExit('Missing GitHub funding assets: ' + name)
 
-aab = out / 'anything-play-1.0.1.aab'
+aab = out / 'anything-play-1.0.2.aab'
 with zipfile.ZipFile(aab) as bundle:
     if {'base/assets/' + item for item in funding_assets} & set(bundle.namelist()):
         raise SystemExit('Funding assets must be absent from the Play bundle.')
@@ -130,8 +135,11 @@ bundle_identity = (parsed.get('package'), parsed.get(android + 'versionCode'), p
 if bundle_identity != expected_identity:
     raise SystemExit(f'Wrong Play bundle package/version: expected {expected_identity}, got {bundle_identity}')
 aab_permissions = {item.get(android + 'name') for item in parsed.findall('uses-permission')}
-if aab_permissions != set(permissions['anything-play-1.0.1.apk']):
-    raise SystemExit('Play bundle and APK permission sets differ.')
+if aab_permissions != (set(permissions['anything.apk']) - {installer_permission}):
+    raise SystemExit('Play bundle and GitHub APK permissions differ beyond the intentionally excluded installer permission.')
+if any(item.get(android + 'name', '').endswith('.ApkInstallProvider')
+       for item in parsed.findall('application/provider')):
+    raise SystemExit('Play bundle must not expose the GitHub installer provider.')
 if parsed.find('uses-sdk').get(android + 'targetSdkVersion') != '36':
     raise SystemExit('Play bundle must target API 36.')
 report = run(['jarsigner', '-verify', str(aab)])
@@ -144,7 +152,7 @@ if not match or match.group(1).replace(':', '').lower() != certificate:
     raise SystemExit('Play bundle signing certificate differs from the APKs.')
 
 native = {}
-for name in ['anything-android-1.0.1.apk', 'anything-play-1.0.1.apk']:
+for name in ['anything-with-sms.apk', 'anything.apk']:
     native[name] = native_layout(out / name, 'lib')
 native[aab.name] = native_layout(aab, 'base/lib')
 (out / 'DISTRIBUTION-CHECKS.json').write_text(json.dumps({

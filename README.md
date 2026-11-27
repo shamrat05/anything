@@ -1,84 +1,52 @@
-<img src="store/assets/icon-512.png" width="72" height="72" alt="Anything app icon">
+<img src="store/assets/icon-512.png" width="64" height="64" alt="Anything app icon">
 
-# Anything
+# Anything for Android
 
-**Building the fastest way to find anything on Android.**
-
-Search Android filenames as you type. Anything is a free, MIT-licensed file search and file manager by CallCraft Studio. The index stays on your phone. Android 8.0 and newer.
-
-[Download the latest release](https://github.com/shamrat05/anything/releases/latest) · [User guide](GUIDE.md) · [Privacy](https://callcraftstudio.com/anything/privacy/) · [Support development](https://callcraftstudio.com/anything/support/)
-
-[![Support on Patreon](store/assets/support-on-patreon.svg)](https://www.patreon.com/cw/Shamrat05/membership) [![Support with USDT](store/assets/support-with-usdt.svg)](https://callcraftstudio.com/anything/support/#usdt-tron)
+Find a file without remembering where it landed. Anything searches filenames on your device, opens common formats, and lets you move from a search result to its folder. The index stays on your phone. Android 8.0 or newer.
 
 ## Download
 
-| Signed APK | Choose it if |
+| Download | What it can access |
 | --- | --- |
-| [SMS-free APK](https://github.com/shamrat05/anything/releases/latest/download/anything-play.apk) | You want file search and management without SMS access. |
-| [Full APK](https://github.com/shamrat05/anything/releases/latest/download/anything-with-sms.apk) | You also want the option to search SMS. |
+| **[Anything for Android](https://github.com/shamrat05/anything/releases/latest/download/anything.apk)** | Files you allow it to access, launchable apps, and contacts if you opt in. No SMS permission. |
+| [Anything for Android with SMS access](https://github.com/shamrat05/anything/releases/latest/download/anything-with-sms.apk) | The same file tools, with optional SMS search and a read-only thread viewer. |
 
-[SHA-256 checksums](https://github.com/shamrat05/anything/releases/latest/download/SHA256SUMS-release.txt)
+[Release notes](https://github.com/shamrat05/anything/releases/latest) · [SHA-256 checksums](https://github.com/shamrat05/anything/releases/latest/download/SHA256SUMS-release.txt)
 
-Install one variant at a time. Open Anything, grant file access and let the first index finish. Later launches reuse the saved index and check for changes in the background. Shared-storage search works without root. For protected folders, select the root index scope on a rooted device and grant root access.
+Install one edition. When updating, choose the edition you already use and install it over the old version. Don't uninstall first.
 
-## What you can do
+## Search, browse, or free up space
 
-- **Find the file you half remember.** Try `invoice ext:pdf` to find PDF invoices. Narrow results by extension, folder, size or modified date, then sort by name, path, size or date. Browse in list, compact or grid view.
-- **Check a file before opening another app.** Preview images, audio, video, PDFs, text and ZIP archives. Swipe between previews, or jump to a file’s folder from its path.
-- **Tidy files right from the results.** Copy, move, rename, share or delete files. For a batch rename, select files and review the proposed names before applying them.
-- **See what’s using space.** Open the storage map to find large files and folders. Use File Manager to browse one folder at a time, with recent folders and bookmarks.
-- **Find more from the same search box.** Search launchable apps and, with permission, contacts. The Full APK can also search SMS when you enable it and grant access.
+- **Search** across accessible folders. Try `boarding ext:pdf` or `video size:>100mb`. Narrow results by file type, name, size, or date.
+- **Files** shows one folder at a time. Open the sidebar beside the search field to switch folders or check used and available storage. Press and hold a file to open its actions without opening a preview. Choose Select items to work with multiple files. To use the compact alternative, turn on **More actions → Appearance → Quick preview file menu**. Open a single file’s popup to preview images, the first PDF page, or text; play supported audio/video on tap. Existing selection actions remain under **Show all file actions**.
+- **Map** shows the relative space used by files and folders. Tap a folder to go inside. Tap a color in the size key to highlight that size, or tap it again to clear. List still shows every item.
+- **Tabs** keep separate folders and searches open. Drag a tab's grip to reorder it, or tap the grip for move options.
+- **Two-pane Files** keeps two folders open independently. Select files on one side, then explicitly confirm Copy or Move to the other. Existing files are never overwritten.
+- **Preview** photos, video, audio, PDFs, text, and ZIP entries without leaving Anything. If an unfamiliar file is actually text, choose **Read as text**. Use **Open in another app** for formats that need a dedicated tool. Some image and audio/video codecs also depend on the device.
+- **Office:** Open DOCX for the main text and table rows, XLSX for a sample of visible worksheet values, or PPTX for text in slide order. It's a read-only summary: it doesn't run formulas or macros, display full layout, or edit the file. Use **Open in another app** for the full document or older Office formats.
+- **Code and text:** Plain TXT keeps its original text with line numbers. Source files get selectable syntax colors based on their filename (including Java, Kotlin, JavaScript/TypeScript, Python, C/C++, Rust, Go, SQL, JSON, HTML/XML, and common config files such as OpenVPN and Android .prop). Use **Syntax** to choose a language manually. Source is displayed, never run. Large previews show the first 128 KiB or 2,000 lines; open another app for the full file.
+- **Widgets:** Add Anything Search or Anything Files from your Android launcher. Search starts blank, and Files opens Internal storage. Neither widget shows your files on the home screen.
+- **APK:** Tap a standalone APK to see its package name, version, and Android requirements. On the GitHub editions, **Install APK** opens Android's confirmation screen. The Play edition only inspects APKs. Only install APKs you trust. **Browse package contents** lists package paths with sizes and offers a read-only preview of eligible text and images. **Browse DEX classes** shows read-only Smali for a standalone DEX or standard DEX files inside an APK. It does not run code, produce Java source, edit or sign APKs.
+- **Archives:** Open a ZIP, JAR, CBZ, TAR, TAR.GZ/TGZ, or GZIP and choose **Extract all**. Files go into a new folder without replacing anything. GZIP alone produces one file; TAR-family previews list names and sizes within a scan limit before you choose whether to extract. The 7z viewer lists up to 60 entries and can extract standard single-volume Copy, LZMA, or LZMA2 archives. For encrypted, split or filtered archives, links and special entries, larger archives, or RAR, use a dedicated archive app.
 
-### Explore more
+Open the three-dot menu for the guided tour, help, and **Check for updates**. The tour points directly to the controls, and you can skip or replay it. The update screen shows your installed version and links only to the matching GitHub APK or Google Play. GitHub updates go through Android’s installer. Anything doesn't check, download, or install updates in the background.
 
-- **Search with precision.** Combine file categories, select extensions, search within a folder, or use exclusions and regular expressions. Try `size:>10mb dm:today` to find larger files modified today.
-- **Browse the way you like.** Pinch to change the layout, jump through results with the scrollbar, or go back to a recent or bookmarked folder. Search shared storage and mounted SD cards without root, or opt into a separate root index on a rooted phone.
-- **Preview more formats.** Browse SVGs, Markdown, HTML and ZIP archives alongside PDFs, images, video and audio. Swipe through results or adjust playback speed in the built-in player.
-- **Clean up a batch at once.** Select or invert a group, then copy, move or rename it. Bulk Rename can replace text, add prefixes or suffixes, and number files with a preview before you apply the changes.
-- **Pick up where you left off.** The optional Last location setting restores your query, folder history and position. Light, dark and system themes are available, and you can hide dotfiles without rebuilding the index.
+## Screenshots
 
-## See it in use
+These are real captures from an earlier build with sample files. Current controls differ.
 
-These are build 2 screenshots from a demo folder with sample files. Select any image to see it at full size.
-
-| Search by name | Narrow by file type | Check a PDF | Preview a bulk rename |
-| --- | --- | --- | --- |
-| <a href="store/assets/anything-build-2-simple-search.png"><img src="store/assets/anything-build-2-simple-search.png" width="180" alt="Typing invoice brings up matching PDFs, an image and a text file"></a> | <a href="store/assets/anything-build-2-filtered-search.png"><img src="store/assets/anything-build-2-filtered-search.png" width="180" alt="The query invoice ext:pdf returns just the two PDFs"></a> | <a href="store/assets/anything-build-2-pdf-preview.png"><img src="store/assets/anything-build-2-pdf-preview.png" width="180" alt="The built-in PDF viewer opens a sample invoice"></a> | <a href="store/assets/anything-build-2-bulk-rename.png"><img src="store/assets/anything-build-2-bulk-rename.png" width="180" alt="Bulk rename previews the original and proposed names for two PDFs"></a> |
-
-| Browse in a grid | Scan filenames in a list | See what takes up space |
+| File grid | Storage map | Rename preview |
 | --- | --- | --- |
-| <a href="store/assets/anything-build-2-grid-browse.png"><img src="store/assets/anything-build-2-grid-browse.png" width="220" alt="Grid view shows PDFs, an image, text, a ZIP archive and audio"></a> | <a href="store/assets/anything-build-2-list-browse.png"><img src="store/assets/anything-build-2-list-browse.png" width="220" alt="List view shows filenames and sizes in the same demo folder"></a> | <a href="store/assets/anything-build-2-storage-map.png"><img src="store/assets/anything-build-2-storage-map.png" width="220" alt="Storage map compares file sizes in the same demo folder"></a> |
+| <img src="store/assets/anything-build-2-grid-browse.png" width="220" alt="File thumbnails in a grid"> | <img src="store/assets/anything-build-2-storage-map.png" width="220" alt="Storage map showing relative file sizes"> | <img src="store/assets/anything-build-2-bulk-rename.png" width="220" alt="Bulk rename preview before confirming changes"> |
 
-More examples and syntax are in the [query guide](core/README.md). For search help or a bug report, open **More actions → Help** or see [app support](SUPPORT.md).
+## Help and source
 
-## Build from source
+[User guide](GUIDE.md) · [Search syntax](core/README.md) · [Support](SUPPORT.md) · [Privacy](https://callcraftstudio.com/anything/privacy/)
 
-Use x86-64 Linux (or x86-64 WSL on Windows). Install JDK 17, Python 3, Bash, Android SDK Platform 36, Build Tools 36.0.0 and NDK 28.2.13676358. Set `ANDROID_HOME` to your Android SDK directory. From the repository root, run:
+To build on x86-64 Linux or WSL, install JDK 17, Android SDK Platform 36, Build Tools 36.0.0, and NDK 28.2.13676358. Set `ANDROID_HOME`, then run:
 
 ```sh
-bash scripts/build.sh :app:assembleFullDebug
+bash scripts/build.sh :app:assembleGithubDebug
 ```
 
-The APK is written to `app/build/outputs/apk/full/debug/app-full-debug.apk`. Use `:app:assemblePlayDebug` to build without SMS access. The [user and maintainer guide](GUIDE.md) covers signing, tests and release packaging.
-
-## Support development
-
-A PDF lands in Downloads. Weeks later all you remember is the word `invoice`. Anything is for that moment. If it saves you time, you can help fund maintenance, bug fixes, and testing on real Android phones. Every feature stays free.
-
-[![Support on Patreon](store/assets/support-on-patreon.svg)](https://www.patreon.com/cw/Shamrat05/membership) [![Support with USDT](store/assets/support-with-usdt.svg)](https://callcraftstudio.com/anything/support/#usdt-tron)
-
-Patreon offers optional $3, $10 and $15 monthly contributions. You can also make a one-time contribution with USDT. In either GitHub APK, open **More actions → Support development**. For help with the app, see [Support](SUPPORT.md).
-
-### USDT on Tron (TRC20)
-
-Send **USDT on Tron (TRC20)** only. The minimum deposit is **more than 0.01 USDT**. No memo or tag is needed.
-
-```
-TCURP3QhbasypbXJkb1ggTzQBYruYsuibv
-```
-
-<img src="store/assets/anything-usdt-tron-qr.svg" width="216" height="216" alt="QR code for the USDT on Tron (TRC20) receiving address">
-
-## License
-
-Copyright © 2026 CallCraft Studio. The project’s original software and documentation are licensed under the [MIT License](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for separately licensed material.
+Use `:app:assembleFullDebug` for the optional SMS build. The guide covers signing and device checks. The app source is [MIT-licensed](LICENSE); bundled materials have [separate notices](THIRD_PARTY_NOTICES.md).

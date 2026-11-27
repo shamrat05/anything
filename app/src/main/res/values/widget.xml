@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="widget_background">#ECEEFF</color>
+    <color name="widget_foreground">#202B80</color>
+    <string name="widget_search_name">Anything Search</string>
+    <string name="widget_files_name">Anything Files</string>
+    <string name="widget_search_label">Search</string>
+    <string name="widget_files_label">Files</string>
+    <string name="widget_search_description">Open Anything with the search box ready.</string>
+    <string name="widget_files_description">Open internal storage in Anything Files.</string>
+</resources>

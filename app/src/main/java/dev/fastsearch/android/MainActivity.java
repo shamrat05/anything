@@ -27,6 +27,7 @@ import android.text.style.StyleSpan;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.Menu;
+import android.view.MenuItem;
 import android.view.SubMenu;
 import android.view.MotionEvent;
 import android.view.View;
@@ -48,6 +49,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 /** The results own the screen; secondary controls live in native menus. */
 public final class MainActivity extends Activity implements FileIndex.Listener {
     private static final int FILE_MANAGER=FileTypes.LABELS.length;
+    private static final int MATCH_OPTIONS=30751, RESET_MATCH_OPTIONS=5, TYPO_MATCH_OPTION=6;
+    private static final int MAX_TYPO_CANDIDATES=250_000, MAX_TYPO_RESULTS=128;
     private static volatile FileIndex probeIndex;
     static void setProbeIndex(FileIndex value){if(!BuildConfig.DEBUG)throw new IllegalStateException("Debug probe only");probeIndex=value;}
     private static volatile boolean permissionProbe;
@@ -58,7 +61,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private final Handler ui=new Handler(Looper.getMainLooper());
     private final ThreadPoolExecutor searches=executor("file-search",1);
     private final ThreadPoolExecutor fileActions=executor("file-action",2);
-    private final ThreadPoolExecutor mapOrders=executor("map-order",1);
+    private final ThreadPoolExecutor mapOrders=executor("map-order",1),mapFilter=executor("map-filter",1);
     private final AtomicInteger sequence=new AtomicInteger();
     private final Set<String> selection=new HashSet<>();
     private final FileOperationService.Listener operationListener=this::onOperationChanged;
@@ -69,15 +72,30 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private SharedPreferences prefs;
     private DeviceSearch deviceSearch;
     private ThumbnailLoader thumbnails;
+    private AppOwnerBadges appOwnerBadges;
     private AutoCompleteTextView query;
     private Spinner category;
     private ImageButton refresh,viewMode,sortButton,optionsButton,pasteButton,clearSearch,subtypeButton,locationsButton;
     private TextView status,message,emptyText,selectionCount,sectionLabel,folderPath,mapSelection;
+    private Button gridSelect,gridModePill;
     private LinearLayout folderBar;
-    private LinearLayout mapLegend;
+    private LinearLayout mapLegend,mapSizeKey;
+    private TextView mapLayoutToggle;
+    private final TextView[] mapSizeSwatches=new TextView[StorageMapView.SIZE_LABELS.length];
+    private int mapSizeBand=StorageMapData.UNKNOWN;
     private ScrollView mapDetails;
     private ImageButton folderUp,folderHistoryButton,mapListButton;
     private StorageMapView mapView;
+    private TextView folderOverview;
+    private Bundle dualPaneState;
+    private final ArrayList<Bundle> workspaces=new ArrayList<>();
+    private final Object workspaceDragToken=new Object();
+    private int workspace,workspaceDrag=-1;
+    private boolean restoringWorkspace;
+    private HorizontalScrollView workspaceStrip;
+    private View activeTabRule;
+    private PullRefreshIndicator refreshPulse;
+    private LinearLayout workspaceTabs;
     private Button emptyAction;
     private ProgressBar progress;
     private LinearLayout controls,selectionBar;
@@ -86,6 +104,9 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private LinearLayout empty;
     private LoadingSkeleton skeleton;
     private boolean longPressConsumed;
+    private FileHoldActions itemActions;
+    private final int[] itemScreen=new int[2];
+    private final android.graphics.Rect itemVisible=new android.graphics.Rect();
     private boolean pullRefreshArmed;
     private float pullStartX, pullStartY;
     private ResultsAdapter adapter;
@@ -95,6 +116,13 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private final ArrayList<Bundle> folderHistory=new ArrayList<>();
     private Bundle browseRestore;
     private boolean openingPreview;
+    private boolean widgetSearchFocus;
+    private static final String PREVIEW_WINDOWS="preview.windows";
+    private static final int MAX_PREVIEW_WINDOWS=4;
+    private final ArrayList<Bundle> minimizedPreviews=new ArrayList<>();
+    private LinearLayout previewDock;
+    private Button resumePreview;
+    private String revealedPreviewPath;
     private String subtype;
     private int subtypeCategory;
     private List<FileSubtypes.Choice> availableSubtypes=Collections.emptyList();
@@ -103,6 +131,12 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private FolderPathDialog pathDialog;
     private int sort,layoutMode,activeLayout=-1,multiTypes;
     private AppSheet activeSheet;
+    private StorageDrawer storageDrawer;
+    private String overviewVolumeRoot;
+    private String cacheRootForLabels;
+    private boolean drawerSwipe;
+    private float drawerStartX,drawerStartY;
+    private SpotlightTour spotlightTour;
     private int gridWidth=112;
     private android.view.ScaleGestureDetector resultPinch;
     private boolean pinchArmed,pinchingResults;
@@ -110,6 +144,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private boolean mixedDeviceSearch;
     private boolean descending,initialRequested,waitingPermission,searchRunning,showHidden,reportedFullyDrawn;
     private boolean matchCase,wholeWord,matchPath,regex,selectionMode,allSelected;
+    private boolean tolerateTypos,typoResults;
     private String provisionalSearchKey;
     private Runnable saveSearchRows;
     private long totalFileMatches,lastSearchMillis;
@@ -122,14 +157,26 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private String deviceNext;
     private boolean restoringDeviceScroll;
     private boolean refreshResults;
-    private boolean storageMap,mapList;
+    private boolean storageMap,mapList,mapSearchResults;
+    private Bundle resultMapReturn;
     private String mapRowsScope;
-    private List<StorageMapData.Tile> mapTiles=Collections.emptyList();
+    private List<StorageMapData.Tile> mapTiles=Collections.emptyList(),orderedMapTiles=Collections.emptyList();
     private int mapSort;
     private boolean mapDescending;
-    private Future<?> pendingMapOrder;
+    private Future<?> pendingMapOrder,pendingMapFilter;
+    private int mapFilterRevision,mapFolderCount;
     private final Map<String,Long> mapSizes=new HashMap<>();
     private long mapTotalBytes;
+    private StorageMapData.Analysis mapAnalysis=new StorageMapData.Analysis(new StorageMapData.Scale(0,0),null,false);
+    private static final long FOREGROUND_CHANGE_CHECK_MS=850;
+    private static final long UNINDEXED_FOLDER_CHECK_MS=5_000;
+    private long lastFolderCheck;
+    private final ThreadPoolExecutor rootWatches=executor("open-root-folder",1);
+    private CancellationSignal rootWatchCancellation;
+    private Runnable rootWatchDeadline;
+    private String rootWatchScope,rootWatchFailedScope,rootWatchVisit,rootDeltaScope;
+    private java.util.concurrent.atomic.AtomicBoolean rootWatchReady;
+    private boolean rootWatchMap;
     private final Runnable folderRefresh=this::refreshOpenFolder;
 
     private static ThreadPoolExecutor executor(String name,int waiting) {
@@ -157,32 +204,66 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         theme=UiTheme.apply(this);INK=theme.ink;CHROME=theme.chrome;LINE=theme.line;MUTED=theme.muted;BLUE=theme.accent;
         super.onCreate(saved);
         theme.bars(this);
+        itemActions=new FileHoldActions(theme,this::fileTargetAt,new FileHoldActions.QuickMode(
+                ()->prefs.getBoolean(QuickPreviewCard.PREFERENCE,false),()->index.isRootEnabled(),fileActions));
         if(BuildConfig.DEBUG&&getPackageName().endsWith(".fresh")&&getIntent().getBooleanExtra("permissionProbe",false))permissionProbe=true;
         prefs=getSharedPreferences("ui",MODE_PRIVATE);
         boolean initialDescending=!prefs.getBoolean("descendingDefault4",false);
         if(initialDescending)prefs.edit().putBoolean("descending",true).putBoolean("descendingDefault4",true).apply();
         index=probeIndex==null?FileIndex.get(this):probeIndex;state=index.getState();
+        itemActions.setFolderSizes(index.folderSizes());
+        if(BuildConfig.DEBUG&&probeIndex==index){
+            try{cacheRootForLabels=getCacheDir().getCanonicalPath();}
+            catch(java.io.IOException unavailable){cacheRootForLabels=getCacheDir().getPath();}
+        }
         deviceSearch=new DeviceSearch(this);thumbnails=new ThumbnailLoader(this);
+        appOwnerBadges=new AppOwnerBadges(this,index::isRootEnabled);
         sort=saved==null?prefs.getInt("sort",3):saved.getInt("sort",3);
         descending=initialDescending||(saved==null?prefs.getBoolean("descending",true):saved.getBoolean("descending",true));
         gridWidth=Math.max(72,Math.min(240,prefs.getInt("gridWidth",112)));layoutMode=prefs.getInt("view",0);multiTypes=saved==null?prefs.getInt("types",0):saved.getInt("types",0);
         showHidden=prefs.getBoolean("showHidden",true);
-        storageMap=prefs.getBoolean("storageMap",false);
+        storageMap=saved==null?prefs.getBoolean("storageMap",false):saved.getBoolean("storageMap");
+        mapSearchResults=storageMap&&(saved==null?prefs.getBoolean("mapSearchResults",false):saved.getBoolean("mapSearchResults"));
+        resultMapReturn=saved==null?null:saved.getBundle("resultMapReturn");
         mapSort=prefs.getInt("mapSort",2);mapDescending=prefs.getBoolean("mapDescending",true);
         mapList=saved!=null&&saved.getBoolean("mapList");
         matchCase=prefs.getBoolean("case",false);wholeWord=prefs.getBoolean("word",false);
         matchPath=prefs.getBoolean("path",false);regex=prefs.getBoolean("regex",false);
+        tolerateTypos=prefs.getBoolean("tolerateTypos",true);
         initialRequested=saved!=null&&saved.getBoolean("initialRequested",false);
-        Bundle start=saved==null?startingLocation():null;
+        int widgetDestination=saved==null?AnythingWidgetProvider.destination(getIntent()):AnythingWidgetProvider.NONE;
+        boolean widgetLaunch=widgetDestination!=AnythingWidgetProvider.NONE;
+        Bundle start=saved==null?(widgetLaunch?new Bundle():startingLocation()):null;
         folderScope=saved==null?start.getString("scope"):saved.getString("scope");
+        overviewVolumeRoot=saved==null?null:saved.getString("overviewVolumeRoot");
         rootHome=saved==null?start.getString("rootHome"):saved.getString("rootHome");
         subtype=saved==null?null:saved.getString("subtype");
         subtypeCategory=Math.min(FILE_MANAGER,saved==null?prefs.getInt("filter",0):saved.getInt("filter",0));
-        if(saved==null&&prefs.getInt("startLocation",2)<2&&isDeviceCategory(subtypeCategory))subtypeCategory=0;
+        if(widgetLaunch){
+            storageMap=false;mapSearchResults=false;multiTypes=0;
+            subtypeCategory=widgetDestination==AnythingWidgetProvider.FILES?FILE_MANAGER:0;
+            widgetSearchFocus=widgetDestination==AnythingWidgetProvider.SEARCH;
+        }
+        else if(saved==null&&prefs.getInt("startLocation",2)<2&&isDeviceCategory(subtypeCategory))subtypeCategory=0;
         if(storageMap&&isDeviceCategory(subtypeCategory))subtypeCategory=0;
-        if(subtypeCategory==FILE_MANAGER&&folderScope==null)folderScope=internalStoragePath();
+        if((subtypeCategory==FILE_MANAGER||storageMap&&!mapSearchResults)&&folderScope==null)folderScope=internalStoragePath();
         if(saved!=null){ArrayList<Bundle> history=saved.getParcelableArrayList("folderHistory");if(history!=null)folderHistory.addAll(history);
             browseRestore=saved.getBundle("browseLocation");}else browseRestore=start;
+        if(saved!=null){
+            ArrayList<Bundle> previous=saved.getParcelableArrayList("workspaces");
+            if(previous!=null&&previous.size()<=8)workspaces.addAll(previous);
+            workspace=Math.max(0,Math.min(workspaces.size()-1,saved.getInt("workspace")));
+        }
+        if(saved!=null)dualPaneState=saved.getBundle("dualPaneState");
+        if(workspaces.isEmpty())workspaces.add(new Bundle());
+        if(saved!=null){
+            ArrayList<Bundle> windows=saved.getParcelableArrayList(PREVIEW_WINDOWS);
+            if(windows!=null)minimizedPreviews.addAll(windows.subList(0,Math.min(windows.size(),MAX_PREVIEW_WINDOWS)));
+            else{
+                Bundle older=saved.getBundle(FileViewerActivity.EXTRA_MINIMIZED);
+                if(older!=null)minimizedPreviews.add(older);
+            }
+        }
         buildUi();initResultPinch();
         category.setSelection(subtypeCategory);
         replaceResults();
@@ -192,19 +273,81 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             ArrayList<String> marked=saved.getStringArrayList("selectedPaths");if(marked!=null)selection.addAll(marked);lastEntries=state.entries;updateSelection();}
         if(Build.VERSION.SDK_INT>=33)getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
                 android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,this::handleBack);
+        if(widgetLaunch){
+            persistWidgetMode();
+            if(widgetDestination==AnythingWidgetProvider.FILES)focusWidgetFiles();
+        }
         index.load();
         ui.post(this::offerFileAccess);
     }
+    @Override protected void onNewIntent(Intent intent){
+        super.onNewIntent(intent);
+        int destination=AnythingWidgetProvider.destination(intent);
+        if(destination==AnythingWidgetProvider.NONE)return;
+        widgetSearchFocus=destination==AnythingWidgetProvider.SEARCH;
+        saveHistory();
+        restoringWorkspace=true;
+        try{
+            clearSelection();clearResultRows();adapter.notifyDataSetChanged();
+            query.dismissDropDown();query.setText("");
+            storageMap=false;mapList=false;mapSearchResults=false;resultMapReturn=null;
+            rootHome=null;overviewVolumeRoot=null;revealedPreviewPath=null;
+            folderScope=destination==AnythingWidgetProvider.FILES?internalStoragePath():null;
+            folderHistory.clear();browseRestore=null;
+            multiTypes=0;subtype=null;subtypeCategory=destination==AnythingWidgetProvider.FILES?FILE_MANAGER:0;
+            category.setSelection(subtypeCategory);
+        }finally{restoringWorkspace=false;}
+        optionsButton.setVisibility(View.VISIBLE);sortButton.setVisibility(View.VISIBLE);
+        replaceResults();persistWidgetMode();runSearch();saveBrowseLocation();
+        if(widgetSearchFocus)focusWidgetSearch();else focusWidgetFiles();
+    }
+    private void focusWidgetFiles(){
+        // clearFocus() alone can put initial focus straight back on the first EditText (Android 8).
+        body.setFocusableInTouchMode(true);
+        body.requestFocus();
+        android.os.IBinder token=body.getWindowToken();
+        android.view.inputmethod.InputMethodManager keyboard=getSystemService(android.view.inputmethod.InputMethodManager.class);
+        if(token!=null&&keyboard!=null)keyboard.hideSoftInputFromWindow(token,0);
+    }
+    private void persistWidgetMode(){
+        prefs.edit().putBoolean("storageMap",false).putBoolean("mapSearchResults",false)
+                .putInt("filter",subtypeCategory).putInt("types",0).apply();
+    }
+    @Override public void onWindowFocusChanged(boolean focused){
+        super.onWindowFocusChanged(focused);
+        if(focused)focusWidgetSearch();
+        else {
+            // If a root manager takes the screen before su's handshake, do not
+            // keep opening its authorization prompt on return to the same folder.
+            if(rootWatchReady!=null&&!rootWatchReady.get())rootWatchFailedScope=rootWatchScope;
+            cancelRootWatch();
+        }
+    }
+    private void focusWidgetSearch(){
+        if(!widgetSearchFocus||query==null||!hasWindowFocus())return;
+        query.post(()->{
+            if(!widgetSearchFocus||isFinishing()||isDestroyed()||!hasWindowFocus())return;
+            widgetSearchFocus=false;
+            if(query.requestFocus()){
+                android.view.inputmethod.InputMethodManager keyboard=getSystemService(android.view.inputmethod.InputMethodManager.class);
+                if(keyboard!=null)keyboard.showSoftInput(query,android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+            }
+        });
+    }
     @Override protected void onStart(){
-        super.onStart();thumbnails.resume();index.addListener(this);FileOperationService.addListener(operationListener);
+        super.onStart();thumbnails.resume();appOwnerBadges.resume();index.addListener(this);FileOperationService.addListener(operationListener);
         onChanged(index.getState());updateClipboard();checkUpdates();
         if(isFolderView()&&!searchRunning)updateFiles();
-        ui.postDelayed(folderRefresh,5000);
+        ui.postDelayed(folderRefresh,FOREGROUND_CHANGE_CHECK_MS);
     }
     @Override protected void onStop(){
         ui.removeCallbacks(folderRefresh);
-        thumbnails.pause();
+        cancelRootWatch();
+        if(itemActions!=null)itemActions.stop();
+        thumbnails.pause();appOwnerBadges.pause();
         if(activeSheet!=null){activeSheet.dismiss();activeSheet=null;}
+        if(spotlightTour!=null)spotlightTour.close();
+        if(storageDrawer!=null)storageDrawer.dismiss();
         if(navigationMenu!=null)navigationMenu.dismiss();
         if(pathDialog!=null)pathDialog.dismiss();
         saveHistory();saveBrowseLocation();prefs.edit().putInt("sort",sort).putBoolean("descending",descending)
@@ -214,19 +357,26 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     @Override protected void onDestroy(){
         if(navigationMenu!=null)navigationMenu.dismiss();
         if(subtypePopup!=null)subtypePopup.dismiss();
+        if(isFinishing())while(!minimizedPreviews.isEmpty())discardMinimizedPreview(0);
         sequence.incrementAndGet();if(pending!=null)pending.cancel(true);
         if(deviceCancellation!=null)deviceCancellation.cancel();
-        searches.shutdownNow();fileActions.shutdownNow();mapOrders.shutdownNow();thumbnails.close();
+        cancelRootWatch();rootWatches.shutdownNow();
+        searches.shutdownNow();fileActions.shutdownNow();mapOrders.shutdownNow();mapFilter.shutdownNow();thumbnails.close();appOwnerBadges.close();
         ui.removeCallbacksAndMessages(null);index.removeListener(this);FileOperationService.removeListener(operationListener);
         results.setOnScrollListener(null);results.setAdapter(null);adapter.items=Collections.emptyList();
         adapter.devices=Collections.emptyList();lastEntries=null;selection.clear();super.onDestroy();
     }
     @Override public void onTrimMemory(int level){super.onTrimMemory(level);if(thumbnails!=null&&(level==TRIM_MEMORY_RUNNING_LOW||level==TRIM_MEMORY_RUNNING_CRITICAL||level>=TRIM_MEMORY_BACKGROUND))thumbnails.trim();}
     @Override protected void onSaveInstanceState(Bundle b){
+        b.putString("overviewVolumeRoot",overviewVolumeRoot);
         b.putInt("types",multiTypes);b.putString("query",query.getText().toString());b.putString("scope",folderScope);b.putString("rootHome",rootHome);b.putInt("sort",sort);
         b.putBoolean("descending",descending);b.putInt("filter",category.getSelectedItemPosition());
         b.putString("subtype",subtype);
-        b.putBoolean("mapList",mapList);
+        if(!minimizedPreviews.isEmpty())b.putParcelableArrayList(PREVIEW_WINDOWS,new ArrayList<>(minimizedPreviews));
+        b.putBoolean("storageMap",storageMap);b.putBoolean("mapSearchResults",mapSearchResults);
+        b.putBundle("resultMapReturn",resultMapReturn);
+        b.putBoolean("mapList",mapList);b.putBundle("dualPaneState",dualPaneState);saveCurrentWorkspace();
+        b.putParcelableArrayList("workspaces",new ArrayList<>(workspaces));b.putInt("workspace",workspace);
         b.putParcelableArrayList("folderHistory",folderHistory);b.putBundle("browseLocation",browseLocation());
         b.putBoolean("initialRequested",initialRequested);super.onSaveInstanceState(b);
         b.putBoolean("selecting",selectionMode);b.putBoolean("allSelected",allSelected);int bytes=0;for(String path:selection)bytes+=path.length()*2;
@@ -237,7 +387,9 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     // Android 13+ uses the registered platform callback; this handles Android 8-12.
     @android.annotation.SuppressLint("GestureBackNavigation")
     @Override public void onBackPressed(){handleBack();}
-    private void handleBack(){if(selectionMode)clearSelection();else if(canGoUp()&&!isDeviceCategory(category.getSelectedItemPosition())){backFolder();}
+    private void handleBack(){if(itemActions!=null&&itemActions.isOpen()){itemActions.stop();return;}if(spotlightTour!=null){spotlightTour.close();return;}
+        if(selectionMode)clearSelection();else if(mapSearchResults)setStorageMap(false);
+        else if(canGoUp()&&!isDeviceCategory(category.getSelectedItemPosition()))backFolder();
         else if(query.length()>0)query.setText("");else finish();}
     private Bundle browseLocation(){if(browseRestore!=null)return new Bundle(browseRestore);
         Bundle location=new Bundle();location.putString("scope",folderScope);location.putString("query",query.getText().toString());
@@ -286,6 +438,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     }
     private void navigateFolder(String path){navigateFolder(path,true);}
     private void navigateFolder(String path,boolean rememberOrigin){
+        revealedPreviewPath=null;
         if(path.equals(folderScope)&&!isDeviceCategory(category.getSelectedItemPosition()))return;
         if(rememberOrigin){if(folderHistory.size()>=64)folderHistory.remove(0);folderHistory.add(browseLocation());}
         browseRestore=null;
@@ -316,10 +469,14 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     }
     private String mapScope(){if(folderScope!=null)return folderScope;
         Iterator<String> volumes=removableLocations().values().iterator();return volumes.hasNext()?volumes.next():internalStoragePath();}
-    private void editFolderPath(){
-        if(pathDialog!=null||folderScope==null)return;
-        pathDialog=new FolderPathDialog(this,index,folderScope,this::normalizeFolderPath,
-                this::jumpToFolder,()->pathDialog=null);
+    private void editFolderPath(){openFolderTree(false);}
+    private void openFolderTree(boolean fromSidebar){
+        if(pathDialog!=null)return;
+        String start=folderScope!=null?folderScope:internalStoragePath();
+        pathDialog=new FolderPathDialog(this,index,fromSidebar?"Folder tree":"Go to folder",start,this::normalizeFolderPath,
+                path->{if(fromSidebar&&!storageMap&&!isFileManager())category.setSelection(FILE_MANAGER);jumpToFolder(path);},
+                ()->pathDialog=null,FolderPathDialog.defaultRoots(index,this::normalizeFolderPath),value->true,showHidden,true);
+        pathDialog.offerStorageOverview(this::showStorageOverview);
         pathDialog.show();
     }
     private String normalizeFolderPath(String path){
@@ -361,17 +518,87 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             }
         });
     }
-    private void showLocations(View anchor){PopupMenu popup=theme.popup(this,anchor);Menu menu=popup.getMenu();
-        Map<String,String> volumes=removableLocations();
-        menu.add("Internal storage").setCheckable(true).setChecked(internalStoragePath().equals(folderScope));
-        for(Map.Entry<String,String> volume:volumes.entrySet())menu.add(volume.getKey()).setCheckable(true).setChecked(volume.getValue().equals(folderScope));
-        menu.add("Root").setCheckable(true).setChecked(rootHome!=null||"/".equals(folderScope)).setEnabled(index.isRootEnabled());
-        showMenu(anchor,menu,"Browse locations",label->{haptic(anchor);
-            if(label.equals("Root")){if(rootHome==null)chooseLocation("/",true);else if(isDeviceCategory(category.getSelectedItemPosition()))category.setSelection(0);}
-            else chooseLocation(volumes.getOrDefault(label,internalStoragePath()),false);
+    private void showLocations(View anchor){
+        if(storageDrawer!=null)return;
+        if(activeSheet!=null)activeSheet.dismiss();
+        StorageDrawer drawer=new StorageDrawer(this);storageDrawer=drawer;
+        drawer.setOnDismissListener(dialog->{
+            if(storageDrawer==drawer){storageDrawer=null;if(spotlightTour!=null)spotlightTour.close();}
         });
+        drawer.setOnKeyListener((dialog,key,event)->{
+            if(key==android.view.KeyEvent.KEYCODE_BACK&&event.getAction()==android.view.KeyEvent.ACTION_UP&&spotlightTour!=null){
+                spotlightTour.close();return true;
+            }
+            return false;
+        });
+        drawer.section("Views");
+        drawer.action("Search",R.drawable.ic_search,!isFolderView()||mapSearchResults,()->selectBrowseMode(0));
+        drawer.action("Files",R.drawable.ic_folder,isFileManager()&&!storageMap,()->selectBrowseMode(1));
+        drawer.action("Storage map",R.drawable.ic_grid,storageMap&&!mapSearchResults,()->selectBrowseMode(2));
+        drawer.action("Two-pane Files",R.drawable.ic_workspaces,false,this::showDualPane);
+        drawer.action("Workspace tabs",R.drawable.ic_list,false,()->showWorkspaceMenu(anchor));
+        drawer.section("Storage");
+        drawer.action("Storage overview",R.drawable.ic_locations,false,this::showStorageOverview);
+        drawer.action("Cleaner",R.drawable.ic_cleaner,false,()->showCleaner(CleanerSheet.Mode.TEMP_CACHE));
+        drawer.action("Duplicate finder",R.drawable.ic_copy,false,()->showCleaner(CleanerSheet.Mode.DUPLICATES));
+        addDrawerVolume(drawer,"Internal storage",internalStoragePath(),Environment.getExternalStorageDirectory().getAbsolutePath());
+        for(Map.Entry<String,String> volume:removableLocations().entrySet())addDrawerVolume(drawer,volume.getKey(),volume.getValue(),volume.getValue());
+        if(index.isRootEnabled())drawer.action("Device root",R.drawable.ic_root,"/".equals(folderScope),()->openDrawerFolder("/",true));
+        drawer.section("Folders");
+        drawer.action("Folder tree",R.drawable.ic_folder,false,()->openFolderTree(true));
+        String shared=Environment.getExternalStorageDirectory().getAbsolutePath();
+        for(String[] place:new String[][]{{"Downloads",Environment.DIRECTORY_DOWNLOADS},{"Documents",Environment.DIRECTORY_DOCUMENTS},
+                    {"Pictures",Environment.DIRECTORY_PICTURES}}){
+            String path=normalizeFolderPath(new File(shared,place[1]).getAbsolutePath());
+            if("/".equals(path))continue;
+            drawer.action(place[0],R.drawable.ic_folder,path.equals(folderScope),()->openDrawerFolder(path,false));
+        }
+        drawer.action("Recent & saved",R.drawable.ic_history,false,()->showFolderHistory(anchor));
+        drawer.show();
+    }
+    private void showStorageOverview(){
+        if(activeSheet!=null)activeSheet.dismiss();
+        List<StorageOverview.Volume> volumes=new ArrayList<>();
+        boolean ownedProbe=probeIndex==index&&!index.roots().isEmpty();
+        String primary=ownedProbe?index.roots().get(0):internalStoragePath();
+        String capacity=ownedProbe?primary:Environment.getExternalStorageDirectory().getAbsolutePath();
+        volumes.add(new StorageOverview.Volume("Internal storage",primary,capacity));
+        if(!ownedProbe){
+            for(Map.Entry<String,String> volume:removableLocations().entrySet()){
+                volumes.add(new StorageOverview.Volume(volume.getKey(),volume.getValue(),volume.getValue()));
+            }
+        }
+        activeSheet=StorageOverview.open(this,volumes,fileActions,MainActivity::size,path->{
+            overviewVolumeRoot=path;
+            openDrawerFolder(path,false);
+            if(query.length()>0)query.setText("");
+            updateSearchControls();
+        },closed->{if(activeSheet==closed)activeSheet=null;});
+    }
+    private boolean atOverviewVolume(){return !mapSearchResults&&folderScope!=null&&folderScope.equals(overviewVolumeRoot)&&isFolderView();}
+    private void openDrawerFolder(String path,boolean root){
+        if(mapSearchResults)setStorageMap(false);
+        if(!storageMap&&!isFileManager())category.setSelection(FILE_MANAGER);
+        chooseLocation(path,root);
+    }
+    private void addDrawerVolume(StorageDrawer drawer,String label,String path,String capacityPath){
+        StorageDrawer.Volume card=drawer.volume(label,path.equals(folderScope),()->openDrawerFolder(path,false));
+        try{fileActions.execute(()->{
+            String description="Space information unavailable";int percent=-1;
+            try{
+                android.os.StatFs fs=new android.os.StatFs(capacityPath);
+                long total=fs.getTotalBytes(),free=Math.max(0,Math.min(total,fs.getAvailableBytes()));
+                if(total>0){
+                    long used=total-free;percent=(int)Math.round(100.0*used/total);
+                    description=size(used)+" used  ·  "+size(free)+" available";
+                }
+            }catch(RuntimeException unavailable){/* Some volumes are unavailable without a grant. */}
+            String value=description;int capacity=percent;
+            ui.post(()->{if(!isDestroyed()&&storageDrawer==drawer)card.update(value,capacity);});
+        });}catch(RejectedExecutionException ended){card.update("Space information unavailable",-1);}
     }
     private void chooseLocation(String path,boolean root){
+        if(root||overviewVolumeRoot!=null&&!isInside(path,overviewVolumeRoot))overviewVolumeRoot=null;
         boolean leavingRoot=!root&&(rootHome!=null||"/".equals(folderScope));
         rootHome=root?"/":null;
         if(root||leavingRoot){folderHistory.clear();folderScope=null;}
@@ -387,15 +614,21 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         new AlertDialog.Builder(this).setTitle("Start location").setSingleChoiceItems(choices,prefs.getInt("startLocation",2),(dialog,which)->{
             prefs.edit().putInt("startLocation",which).apply();dialog.dismiss();}).setNegativeButton("Cancel",null).show();
     }
-    private boolean canGoUp(){return folderScope!=null&&!folderScope.equals(rootHome)
-            &&(!folderHistory.isEmpty()||parentFolder()!=null);}
+    private boolean canGoUp(){return atOverviewVolume()||(folderScope!=null&&!folderScope.equals(rootHome)
+            &&(!folderHistory.isEmpty()||parentFolder()!=null));}
     private String parentFolder(){
         if(folderScope==null||folderScope.equals(rootHome)||folderScope.equals(internalStoragePath())
                 ||removableLocations().containsValue(folderScope))return null;
         File parent=new File(folderScope).getParentFile();
         return parent==null?null:parent.getPath();
     }
-    private void backFolder(){if(!canGoUp())return;clearSelection();
+    private void backFolder(){if(!canGoUp())return;revealedPreviewPath=null;clearSelection();
+        if(atOverviewVolume()){
+            overviewVolumeRoot=null;
+            updateSearchControls();
+            showStorageOverview();
+            return;
+        }
         if(folderHistory.isEmpty()){
             browseRestore=new Bundle();
             if(isFolderView()||rootHome!=null)browseRestore.putString("scope",parentFolder());
@@ -407,7 +640,11 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         if(!query.getText().toString().equals(input))query.setText(input);else runSearch();saveBrowseLocation();}
     private void restoreBrowsePosition(Bundle location){if(location==null)return;
         int position=location.getInt("position",0);String anchor=location.getString("anchor");
-        if(anchor!=null)for(int i=0;i<adapter.items.size();i++)if(adapter.items.get(i).pathEquals(anchor)){position=adapter.devices.size()+i;break;}
+        boolean found=false;
+        if(anchor!=null)for(int i=0;i<adapter.items.size();i++)if(adapter.items.get(i).pathEquals(anchor)){position=adapter.devices.size()+i;found=true;break;}
+        if(!found&&anchor!=null&&anchor.equals(revealedPreviewPath)){
+            revealedPreviewPath=null;toast("This file is not visible in the folder.");
+        }
         position=Math.max(0,Math.min(position,adapter.getCount()-1));
         restoreResultOffset(position,location.getInt("top",0));updateSection(position);}
     private void restoreResultOffset(int position,int offset){
@@ -447,7 +684,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         query.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
         query.setPadding(dp(48),0,dp(6),0);query.setBackground(background(theme.surface,24));query.setTextColor(INK);query.setHintTextColor(MUTED);
         FrameLayout searchField=new FrameLayout(this);searchField.addView(query,new FrameLayout.LayoutParams(-1,-1));
-        locationsButton=icon(R.drawable.ic_locations,"Browse locations");locationsButton.setId(R.id.browse_locations);locationsButton.setOnClickListener(this::showLocations);
+        locationsButton=icon(R.drawable.ic_sidebar,"Open sidebar");locationsButton.setId(R.id.browse_locations);locationsButton.setOnClickListener(this::showLocations);
         searchField.addView(locationsButton,new FrameLayout.LayoutParams(dp(48),-1,Gravity.START));
         clearSearch=icon(R.drawable.ic_close,"Clear search");clearSearch.setId(R.id.clear_search);
         clearSearch.setVisibility(View.GONE);clearSearch.setOnClickListener(v->clearSearchOrFolder());
@@ -455,21 +692,40 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         searchField.addView(clearSearch,new FrameLayout.LayoutParams(dp(48),-1,Gravity.END));
         search.addView(searchField,new LinearLayout.LayoutParams(0,dp(48),1));
         refresh=icon(R.drawable.ic_refresh,"Refresh index");refresh.setId(R.id.refresh);
-        refresh.setOnClickListener(v->{haptic(v);if(isFolderView())updateFiles();
+        refresh.setOnClickListener(v->{haptic(v);rootWatchFailedScope=null;if(isFolderView()&&!mapSearchResults)updateFiles();
             else if(isDeviceCategory(category.getSelectedItemPosition())){deviceSearch.invalidateApps();runSearch();}
             else if(state.scanning)index.cancelScan();else startIndexing();});search.addView(refresh);
+        ImageButton windows=icon(R.drawable.ic_windows,"Switch windows");windows.setId(R.id.workspace_switcher);
+        windows.setOnClickListener(this::showWorkspaceMenu);
+        boolean windowInTools=getResources().getConfiguration().screenWidthDp>=392;
+        if(!windowInTools)search.addView(windows);
         ImageButton overflow=icon(R.drawable.ic_more,"More actions");overflow.setId(R.id.overflow);
         overflow.setOnClickListener(this::showOverflow);search.addView(overflow);root.addView(search);
-        controls=row();controls.setPadding(dp(4),0,dp(4),0);
-        category=new Spinner(this);category.setId(R.id.category);category.setContentDescription("Search category");
+        workspaceStrip=new HorizontalScrollView(this);workspaceStrip.setHorizontalScrollBarEnabled(false);
+        workspaceTabs=row();workspaceStrip.addView(workspaceTabs,new FrameLayout.LayoutParams(-2,dp(48)));
+        root.addView(workspaceStrip,new LinearLayout.LayoutParams(-1,dp(48)));drawWorkspaces();
+        previewDock=row();previewDock.setPadding(dp(6),0,dp(4),0);previewDock.setBackground(background(CHROME,14));
+        resumePreview=button("Resume preview");resumePreview.setId(R.id.preview_resume);resumePreview.setAllCaps(false);
+        resumePreview.setSingleLine();resumePreview.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        resumePreview.setContentDescription("Resume minimized preview");
+        resumePreview.setOnClickListener(v->restoreMinimizedPreview());previewDock.addView(resumePreview,new LinearLayout.LayoutParams(0,dp(48),1));
+        ImageButton discardPreview=icon(R.drawable.ic_close,"Close minimized preview");
+        discardPreview.setOnClickListener(v->{discardMinimizedPreview(0);updatePreviewDock();});previewDock.addView(discardPreview);
+        LinearLayout.LayoutParams dockLayout=new LinearLayout.LayoutParams(-1,dp(48));dockLayout.setMargins(dp(7),0,dp(7),dp(4));
+        root.addView(previewDock,dockLayout);updatePreviewDock();
+        controls=row();controls.setPadding(dp(4),0,dp(4),0);controls.setBackgroundColor(CHROME);
+        category=new Spinner(this,Spinner.MODE_DIALOG){
+            @Override public boolean performClick(){showCategories(this);return true;}
+        };
+        category.setId(R.id.category);category.setContentDescription("Search category");
         category.setAdapter(new CategoryAdapter());category.setTooltipText("Hold to choose file types");
         category.setOnLongClickListener(v->{chooseTypes();return true;});controls.addView(category,new LinearLayout.LayoutParams(0,dp(48),1));
         subtypeButton=icon(R.drawable.ic_subtype,"File extensions");subtypeButton.setId(R.id.file_subtypes);subtypeButton.setVisibility(View.GONE);
         subtypeButton.setOnClickListener(v->showSubtypes(false));controls.addView(subtypeButton);
         viewMode=icon(R.drawable.ic_list,"Change view");viewMode.setId(R.id.view_mode);viewMode.setOnClickListener(v->chooseView());controls.addView(viewMode);
         sortButton=icon(R.drawable.ic_sort,"Sort results");sortButton.setId(R.id.sort);sortButton.setOnClickListener(this::showSort);controls.addView(sortButton);
-        optionsButton=icon(R.drawable.ic_options,"Search options");optionsButton.setId(R.id.search_options);optionsButton.setOnClickListener(v->searchOptions());controls.addView(optionsButton);
-        pasteButton=icon(R.drawable.ic_paste,"Paste files");pasteButton.setId(R.id.paste);pasteButton.setOnClickListener(v->paste());controls.addView(pasteButton);root.addView(controls);
+        optionsButton=icon(R.drawable.ic_options,"Search options");optionsButton.setId(R.id.search_options);optionsButton.setOnClickListener(v->searchOptions());controls.addView(optionsButton);updateSearchOptionsBadge();
+        pasteButton=icon(R.drawable.ic_paste,"Paste files");pasteButton.setId(R.id.paste);pasteButton.setOnClickListener(v->paste());if(windowInTools)controls.addView(windows);controls.addView(pasteButton);root.addView(controls);
         selectionBar=row();selectionBar.setId(R.id.selection_bar);selectionBar.setBackgroundColor(CHROME);selectionBar.setVisibility(View.GONE);
         ImageButton close=icon(R.drawable.ic_close,"Clear selection");close.setOnClickListener(v->clearSelection());selectionBar.addView(close);
         selectionCount=text("",14);selectionCount.setId(R.id.selection_count);selectionCount.setSingleLine();selectionBar.addView(selectionCount,new LinearLayout.LayoutParams(0,dp(48),1));
@@ -491,25 +747,72 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         folderHistoryButton=icon(R.drawable.ic_history,"Folder history");
         folderHistoryButton.setOnClickListener(this::showFolderHistory);
         folderBar.addView(folderHistoryButton);
-        mapListButton=icon(R.drawable.ic_list,"Show file list");mapListButton.setOnClickListener(v->showMapList(!mapList));
+        mapListButton=icon(R.drawable.ic_grid,"Show storage map");
+        mapListButton.setOnClickListener(v->{if(mapSearchResults)setStorageMap(false);else selectBrowseMode(storageMap?1:2);});
+        mapListButton.setOnLongClickListener(v->{if(!storageMap)return false;showMapList(!mapList);return true;});
         folderBar.addView(mapListButton);
         root.addView(folderBar);
+        folderOverview=text("",12);folderOverview.setTextColor(MUTED);
+        folderOverview.setPadding(dp(12),dp(5),dp(12),dp(5));folderOverview.setVisibility(View.GONE);
+        root.addView(folderOverview,new LinearLayout.LayoutParams(-1,-2));
         mapLegend=row();mapLegend.setPadding(dp(6),dp(2),dp(6),dp(2));
-        mapLegend.setContentDescription("Block color by size");mapLegend.setVisibility(View.GONE);root.addView(mapLegend);
+        mapLegend.setVisibility(View.GONE);root.addView(mapLegend);
+        mapSizeKey=row();mapSizeKey.setGravity(Gravity.CENTER_VERTICAL);
+        mapSizeKey.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        mapLegend.addView(mapSizeKey,new LinearLayout.LayoutParams(0,dp(48),1));
+        mapLayoutToggle=text("List",12);mapLayoutToggle.setGravity(Gravity.CENTER);
+        mapLayoutToggle.setFocusable(true);
+        mapLayoutToggle.setBackground(new android.graphics.drawable.InsetDrawable(background(theme.chrome,8),dp(2),dp(10),dp(2),dp(10)));
+        mapLayoutToggle.setOnClickListener(v->{showMapList(!mapList);saveBrowseLocation();});
+        mapLegend.addView(mapLayoutToggle,new LinearLayout.LayoutParams(dp(64),dp(48)));
+        View resultsDivider=new View(this);
+        resultsDivider.setBackgroundColor(theme.line);
+        resultsDivider.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        root.addView(resultsDivider,new LinearLayout.LayoutParams(-1,dp(1)));
         body=new FrameLayout(this);adapter=new ResultsAdapter();replaceResults();
         mapView=new StorageMapView(this,theme,MainActivity::size);
+        mapView.setAppOwnerBadges(appOwnerBadges);
         mapView.labels=tile->edgeFileLabel(tile.entry,mapSort,tile.bytes);
         mapView.setVisibility(View.GONE);body.addView(mapView,new FrameLayout.LayoutParams(-1,-1));
-        for(int i=0;i<StorageMapView.SIZE_LABELS.length;i++){
-            TextView swatch=text(StorageMapView.SIZE_LABELS[i],11);swatch.setGravity(Gravity.CENTER);
-            swatch.setBackground(background(mapView.fillColor(i),5));
-            LinearLayout.LayoutParams labelParams=new LinearLayout.LayoutParams(0,dp(25),1);
-            labelParams.setMargins(dp(2),0,dp(2),0);mapLegend.addView(swatch,labelParams);
+        for(int i=0;i<mapSizeSwatches.length;i++){
+            final int band=i;
+            TextView swatch=text(i==0?"Smallest":i==mapSizeSwatches.length-1?"Largest":"",9);
+            swatch.setGravity(Gravity.CENTER);
+            swatch.setSingleLine(true);swatch.setEllipsize(TextUtils.TruncateAt.END);swatch.setFocusable(true);
+            swatch.setOnClickListener(v->setMapSizeBand(mapSizeBand==band?StorageMapData.UNKNOWN:band));
+            mapSizeSwatches[i]=swatch;
+            mapSizeKey.addView(swatch,new LinearLayout.LayoutParams(0,dp(48),1));
         }
+        setMapSizeBand(StorageMapData.UNKNOWN);
         sectionLabel=text("",11);sectionLabel.setId(R.id.result_section);sectionLabel.setSingleLine();sectionLabel.setEllipsize(TextUtils.TruncateAt.MIDDLE);
         sectionLabel.setTextColor(MUTED);sectionLabel.setPadding(dp(12),0,dp(16),0);sectionLabel.setBackgroundColor(theme.surface);
         sectionLabel.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);sectionLabel.setVisibility(View.GONE);
         body.addView(sectionLabel,new FrameLayout.LayoutParams(-1,dp(24),Gravity.TOP));
+        LinearLayout gridControls=row();
+        gridControls.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout.LayoutParams floating=new FrameLayout.LayoutParams(-2,dp(48),Gravity.TOP|Gravity.END);
+        floating.setMarginEnd(dp(6));
+        gridControls.setElevation(dp(2));
+        body.addView(gridControls,floating);
+
+        gridModePill=makeGridPill("Grid","Grid layout. Change view");
+        gridModePill.setId(R.id.grid_mode_pill);
+        gridModePill.setOnClickListener(v->chooseView(v));
+        gridControls.addView(gridModePill,new LinearLayout.LayoutParams(-2,dp(48)));
+
+        gridSelect=makeGridPill("Select","Select multiple files in grid");
+        gridSelect.setId(R.id.grid_select);
+        // Align the checkbox and its text as one small group, rather than centering
+        // the label in a separately sized box.
+        gridSelect.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
+        android.graphics.drawable.Drawable selectMark=getDrawable(R.drawable.ic_select).mutate();
+        selectMark.setTint(theme.ink);selectMark.setBounds(0,0,dp(15),dp(15));
+        gridSelect.setCompoundDrawablesRelative(selectMark,null,null,null);
+        gridSelect.setCompoundDrawablePadding(dp(3));
+        gridSelect.setOnClickListener(v->startGridSelection(v));
+        LinearLayout.LayoutParams selectParams=new LinearLayout.LayoutParams(-2,dp(48));
+        selectParams.setMarginStart(dp(2));
+        gridControls.addView(gridSelect,selectParams);
         skeleton=new LoadingSkeleton(this,activeLayout==3?LoadingSkeleton.GRID:LoadingSkeleton.LIST);skeleton.setVisibility(View.GONE);body.addView(skeleton,new FrameLayout.LayoutParams(-1,-1));
         empty=new LinearLayout(this);empty.setOrientation(LinearLayout.VERTICAL);empty.setGravity(Gravity.CENTER);empty.setPadding(dp(24),dp(16),dp(24),dp(16));empty.setBackgroundColor(theme.surface);
         emptyText=text("Loading index",16);emptyText.setGravity(Gravity.CENTER);empty.addView(emptyText,new LinearLayout.LayoutParams(-1,-2));
@@ -531,20 +834,235 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         mapDetails.addView(mapSelection,new ScrollView.LayoutParams(-1,-2));
         FrameLayout.LayoutParams detailsParams=new FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM);
         detailsParams.setMargins(dp(6),0,dp(6),dp(5));body.addView(mapDetails,detailsParams);
+        refreshPulse=new PullRefreshIndicator(this,theme);
+        FrameLayout.LayoutParams pulseLayout=new FrameLayout.LayoutParams(dp(38),dp(38),Gravity.TOP|Gravity.CENTER_HORIZONTAL);
+        pulseLayout.topMargin=dp(8);body.addView(refreshPulse,pulseLayout);
         category.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener(){public void onNothingSelected(AdapterView<?> p){}
-            public void onItemSelected(AdapterView<?> p,View v,int position,long id){if(position==subtypeCategory)return;
+            public void onItemSelected(AdapterView<?> p,View v,int position,long id){if(restoringWorkspace||position==subtypeCategory)return;
                 prefs.edit().putInt("filter",position).apply();
                 if(position!=0&&position!=FILE_MANAGER&&multiTypes!=0){multiTypes=0;prefs.edit().putInt("types",0).apply();}clearSelection();
                 if(position!=subtypeCategory){subtype=null;subtypeCategory=position;if(subtypePopup!=null)subtypePopup.dismiss();}
                 if(isDeviceCategory(position)&&rootHome==null){folderScope=null;folderHistory.clear();}
-                if(isDeviceCategory(position)&&storageMap)setStorageMap(false);
+                if(storageMap&&(isDeviceCategory(position)||mapSearchResults&&position==FILE_MANAGER))setStorageMap(false);
+                else if(storageMap&&!mapSearchResults&&position!=0&&position!=FILE_MANAGER){setStorageMap(true,true);return;}
                 if(position==FILE_MANAGER&&folderScope==null)folderScope=internalStoragePath();
                 saveBrowseLocation();
                 replaceResults();optionsButton.setVisibility(isDeviceCategory(position)?View.GONE:View.VISIBLE);
                 sortButton.setVisibility(isDeviceCategory(position)?View.GONE:View.VISIBLE);runSearch();}});
         query.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int c,int f){}
-            public void onTextChanged(CharSequence s,int a,int b,int c){clearSelection();runSearch();}public void afterTextChanged(Editable value){}});
+            public void onTextChanged(CharSequence s,int a,int b,int c){if(restoringWorkspace)return;clearSelection();if(storageMap&&!mapSearchResults&&Objects.equals(mapRowsScope,mapScope())){applyMapOrder(orderedMapTiles,true);updateSearchControls();}else if(!storageMap||mapSearchResults||!searchRunning)runSearch();}public void afterTextChanged(Editable value){}});
         query.setOnEditorActionListener((v,action,event)->{if(action==EditorInfo.IME_ACTION_SEARCH){saveHistory();query.dismissDropDown();runSearch();return true;}return false;});refreshHistory();
+    }
+    private void selectBrowseMode(int mode){
+        if(mode==2){setStorageMap(true);return;}
+        if(mode==1){
+            if(folderScope==null)folderScope=internalStoragePath();
+            if(!isFileManager())category.setSelection(FILE_MANAGER);
+            if(storageMap)setStorageMap(false);else if(isFileManager())runSearch();
+        }else{
+            if(!isFolderView())return;
+            if(isFileManager()||isDeviceCategory(category.getSelectedItemPosition()))category.setSelection(0);
+            if(storageMap)setStorageMap(false);else runSearch();
+        }
+        saveBrowseLocation();
+    }
+    private void displayFolderOverview(){
+        folderOverview.setVisibility(isFolderView()?View.VISIBLE:View.GONE);
+        if(!isFolderView())return;
+        if(searchRunning){folderOverview.setText(mapSearchResults?"Mapping indexed results…":"Checking folder…");return;}
+        if(mapSearchResults){
+            String summary=size(mapTotalBytes)+" in indexed files";
+            if(mapFolderCount!=0)summary+="  •  Folder sizes not included";
+            if(mapAnalysis.largestFile!=null){
+                FileEntry largest=mapAnalysis.largestFile;
+                summary+="\nLargest match: "+largest.name.replace('\n',' ').replace('\r',' ')+" · "+size(largest.size);
+            }
+            folderOverview.setMaxLines(2);folderOverview.setEllipsize(TextUtils.TruncateAt.END);
+            folderOverview.setText(summary);return;
+        }
+        int folders=mapFolderCount;
+        if(!storageMap){folders=0;for(FileEntry entry:adapter.items)if(entry.directory)folders++;}
+        int files=(storageMap?mapTiles.size():adapter.items.size())-folders;
+        String totals=format(folders)+(folders==1?" folder":" folders")+"  •  "+format(files)+(files==1?" file":" files");
+        if(!storageMap){folderOverview.setText(totals+"  •  Tap Map for sizes");return;}
+        FileEntry largest=mapAnalysis.largestFile;
+        String summary=size(mapTotalBytes)+" in files  •  "+totals;
+        if(largest!=null){
+            String name=largest.name.replace('\n',' ').replace('\r',' ');
+            summary+="\n"+(mapAnalysis.indexed?"Largest indexed: ":"Largest file: ")+name+" · "+size(largest.size);
+        }
+        folderOverview.setMaxLines(2);folderOverview.setEllipsize(TextUtils.TruncateAt.END);
+        folderOverview.setText(summary);
+    }
+    private void saveCurrentWorkspace(){
+        if(query==null||results==null||workspaces.isEmpty())return;
+        Bundle model=browseLocation();
+        model.putInt("category",category.getSelectedItemPosition());
+        model.putInt("sort",sort);model.putBoolean("descending",descending);
+        model.putInt("types",multiTypes);model.putInt("layout",layoutMode);model.putInt("grid",gridWidth);
+        model.putString("subtype",subtype);model.putString("overviewVolumeRoot",overviewVolumeRoot);model.putBoolean("map",storageMap);model.putBoolean("mapList",mapList);
+        model.putBoolean("mapSearchResults",mapSearchResults);model.putBundle("resultMapReturn",resultMapReturn);
+        model.putParcelableArrayList("history",new ArrayList<>(folderHistory.subList(Math.max(0,folderHistory.size()-16),folderHistory.size())));
+        workspaces.set(workspace,model);
+    }
+    private String workspaceLabel(int position){
+        Bundle state=workspaces.get(position);
+        String mode=state.getBoolean("map")?"Map":state.getInt("category")==FILE_MANAGER?"Files":"Search";
+        String name=state.getString("query","");
+        if(name.isEmpty()){
+            String path=state.getString("scope");
+            if(path!=null)name="/".equals(path)?"Root":new File(path).getName();
+        }
+        if(name.length()>42)name=name.substring(0,42)+"…";
+        return name.isEmpty()?mode:mode+": "+name;
+    }
+    private View windowsButton(){return findViewById(R.id.workspace_switcher);}
+    private void showWorkspaceMenu(View anchor){
+        saveCurrentWorkspace();
+        Menu menu=theme.popup(this,anchor).getMenu();
+        java.util.Map<String,Bundle> previews=new java.util.LinkedHashMap<>(),closable=new java.util.LinkedHashMap<>();
+        if(!minimizedPreviews.isEmpty()){
+            SubMenu close=menu.addSubMenu("Close a preview");
+            for(int i=0;i<minimizedPreviews.size();i++){
+                Bundle state=minimizedPreviews.get(i);
+                String label=(i+1)+". "+previewWindowLabel(state);
+                String resume="Resume "+label,discard="Close "+label;
+                menu.add(resume).setIcon(R.drawable.ic_file);
+                close.add(discard).setIcon(R.drawable.ic_close);
+                previews.put(resume,state);closable.put(discard,state);
+            }
+        }
+        menu.add(dualPaneState==null?"Open two-pane Files":"Resume two-pane Files");
+        for(int i=0;i<workspaces.size();i++)menu.add((i+1)+". "+workspaceLabel(i)).setCheckable(true).setChecked(i==workspace);
+        menu.add("New tab").setEnabled(workspaces.size()<8);
+        menu.add("Close tab").setEnabled(workspaces.size()>1);
+        showMenu(anchor,menu,"Switch windows",value->{
+            if(previews.containsKey(value)){restoreMinimizedPreview(minimizedPreviews.indexOf(previews.get(value)));}
+            else if(closable.containsKey(value)){
+                discardMinimizedPreview(minimizedPreviews.indexOf(closable.get(value)));updatePreviewDock();
+            }else if("Open two-pane Files".equals(value)||"Resume two-pane Files".equals(value)){showDualPane();}
+            else if("New tab".equals(value)){
+                Bundle next=new Bundle();next.putInt("sort",sort);next.putBoolean("descending",descending);
+                workspaces.add(next);showWorkspace(workspaces.size()-1);
+            }else if("Close tab".equals(value)){
+                workspaces.remove(workspace);showWorkspace(Math.min(workspace,workspaces.size()-1));
+            }else{
+                int to=Integer.parseInt(value.substring(0,value.indexOf('.')))-1;
+                if(to!=workspace)showWorkspace(to);
+            }
+        });
+    }
+    private void drawWorkspaces(){
+        workspaceStrip.setVisibility(workspaces.size()>1?View.VISIBLE:View.GONE);
+        workspaceTabs.removeAllViews();activeTabRule=null;if(workspaces.size()<2)return;
+        for(int i=0;i<workspaces.size();i++){
+            final int position=i;
+            LinearLayout tile=row();tile.setBackground(background(CHROME,12));
+            LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-2,dp(48));lp.setMarginEnd(dp(6));workspaceTabs.addView(tile,lp);
+            Button tab=new Button(this);tab.setAllCaps(false);tab.setText(workspaceLabel(i));tab.setTextSize(12);tab.setMaxWidth(dp(150));
+            tab.setSingleLine();tab.setEllipsize(TextUtils.TruncateAt.END);tab.setPadding(dp(8),0,dp(8),0);
+            tab.setMinimumWidth(0);tab.setMinWidth(0);tab.setSelected(i==workspace);tab.setTextColor(i==workspace?(theme.dark?theme.surface:Color.WHITE):INK);
+            tab.setBackground(new android.graphics.drawable.RippleDrawable(ColorStateList.valueOf(theme.line),
+                    background(i==workspace?BLUE:CHROME,12),background(Color.WHITE,12)));
+            FrameLayout tabSlot=new FrameLayout(this);
+            tabSlot.addView(tab,new FrameLayout.LayoutParams(-2,dp(48)));
+            if(i==workspace){
+                activeTabRule=BrandAccent.rule(this);
+                FrameLayout.LayoutParams ruleLayout=new FrameLayout.LayoutParams(dp(26),dp(2),Gravity.CENTER_HORIZONTAL|Gravity.BOTTOM);
+                ruleLayout.bottomMargin=dp(3);tabSlot.addView(activeTabRule,ruleLayout);
+            }
+            tile.addView(tabSlot,new LinearLayout.LayoutParams(-2,dp(48)));
+            tab.setOnClickListener(view->{if(position!=workspace){saveCurrentWorkspace();showWorkspace(position);}});
+            ImageButton grip=icon(R.drawable.ic_workspace_grip,"Move tab "+(i+1));
+            grip.setTooltipText("Drag to reorder; tap for move options");tile.addView(grip);
+            grip.setOnClickListener(view->{
+                saveCurrentWorkspace();
+                Menu menu=theme.popup(this,view).getMenu();
+                menu.add("Move earlier").setEnabled(position>0);
+                menu.add("Move later").setEnabled(position+1<workspaces.size());
+                showMenu(view,menu,"Move tab",value->moveWorkspace(position,position+("Move earlier".equals(value)?-1:1)));
+            });
+            grip.setOnLongClickListener(view->beginWorkspaceDrag(view,tile,position));
+            final float[] start=new float[2];
+            final boolean[] dragging={false};
+            final int slop=android.view.ViewConfiguration.get(this).getScaledTouchSlop();
+            grip.setOnTouchListener((view,event)->{
+                switch(event.getActionMasked()){
+                    case MotionEvent.ACTION_DOWN:
+                        dragging[0]=false;start[0]=event.getX();start[1]=event.getY();
+                        view.getParent().requestDisallowInterceptTouchEvent(true);return false;
+                    case MotionEvent.ACTION_MOVE:
+                        if(dragging[0])return true;
+                        float dx=Math.abs(event.getX()-start[0]),dy=Math.abs(event.getY()-start[1]);
+                        if(dx>slop&&dx>=dy){
+                            view.cancelLongPress();view.setPressed(false);
+                            dragging[0]=beginWorkspaceDrag(view,tile,position);
+                        }
+                        return dragging[0];
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_CANCEL:
+                        view.getParent().requestDisallowInterceptTouchEvent(false);
+                        return dragging[0];
+                    default:return dragging[0];
+                }
+            });
+            tile.setOnDragListener((view,event)->{
+                if(event.getLocalState()!=workspaceDragToken)return false;
+                switch(event.getAction()){
+                    case android.view.DragEvent.ACTION_DRAG_STARTED:return workspaceDrag>=0;
+                    case android.view.DragEvent.ACTION_DRAG_ENTERED:
+                        if(workspaceDrag!=position)view.setForeground(background(0x303293ff,12));return true;
+                    case android.view.DragEvent.ACTION_DRAG_EXITED:
+                    case android.view.DragEvent.ACTION_DRAG_ENDED:
+                        view.setForeground(null);return true;
+                    case android.view.DragEvent.ACTION_DROP:
+                        int from=workspaceDrag;workspaceDrag=-1;view.setForeground(null);
+                        if(from>=0)ui.post(()->moveWorkspace(from,position));return from>=0;
+                    default:return true;
+                }
+            });
+        }
+        View active=workspaceTabs.getChildAt(workspace);
+        workspaceStrip.post(()->{if(active.getParent()==workspaceTabs)workspaceStrip.requestChildRectangleOnScreen(workspaceTabs,
+                new android.graphics.Rect(active.getLeft(),0,active.getRight(),active.getHeight()),false);});
+    }
+    private boolean beginWorkspaceDrag(View grip,View tile,int position){
+        workspaceDrag=position;
+        if(grip.startDragAndDrop(null,new View.DragShadowBuilder(tile),workspaceDragToken,0))return true;
+        workspaceDrag=-1;return false;
+    }
+    private void moveWorkspace(int from,int to){
+        if(from<0||to<0||from>=workspaces.size()||to>=workspaces.size()||from==to)return;
+        saveCurrentWorkspace();
+        Bundle active=workspaces.get(workspace);
+        workspaces.add(to,workspaces.remove(from));workspace=workspaces.indexOf(active);
+        drawWorkspaces();workspaceStrip.announceForAccessibility("Moved tab to position "+(to+1));
+    }
+    private void showWorkspace(int position){
+        workspace=position;
+        Bundle model=workspaces.get(position);
+        restoringWorkspace=true;
+        try{
+            clearSelection();clearResultRows();adapter.notifyDataSetChanged();
+            folderScope=model.getString("scope");rootHome=index.isRootEnabled()?model.getString("rootHome"):null;
+            overviewVolumeRoot=model.getString("overviewVolumeRoot");
+            storageMap=model.getBoolean("map");mapList=model.getBoolean("mapList");
+            mapSearchResults=storageMap&&model.getBoolean("mapSearchResults");resultMapReturn=model.getBundle("resultMapReturn");
+            subtypeCategory=model.getInt("category");category.setSelection(subtypeCategory);
+            if((storageMap&&!mapSearchResults||subtypeCategory==FILE_MANAGER)&&folderScope==null)folderScope=internalStoragePath();
+            if(!index.isRootEnabled()&&folderScope!=null&&(folderScope.startsWith("/data/media/")||"/".equals(folderScope)))folderScope=null;
+            sort=model.getInt("sort",3);descending=model.getBoolean("descending",true);layoutMode=model.getInt("layout");
+            gridWidth=model.getInt("grid",112);multiTypes=model.getInt("types");subtype=model.getString("subtype");
+            folderHistory.clear();
+            ArrayList<Bundle> history=model.getParcelableArrayList("history");if(history!=null)folderHistory.addAll(history);
+            browseRestore=new Bundle(model);query.dismissDropDown();query.setText(model.getString("query",""));query.clearFocus();
+            prefs.edit().putBoolean("storageMap",storageMap).putBoolean("mapSearchResults",mapSearchResults).putInt("filter",subtypeCategory).putInt("view",layoutMode)
+                    .putInt("types",multiTypes).putInt("gridWidth",gridWidth).apply();
+        }finally{restoringWorkspace=false;}
+        optionsButton.setVisibility(isDeviceCategory(subtypeCategory)?View.GONE:View.VISIBLE);
+        sortButton.setVisibility(isDeviceCategory(subtypeCategory)?View.GONE:View.VISIBLE);
+        replaceResults();runSearch();saveBrowseLocation();drawWorkspaces();
+        if(activeTabRule!=null)BrandAccent.reveal(activeTabRule);
     }
     private static boolean isDeviceCategory(int position){return position>=9&&position<FILE_MANAGER;}
     private boolean isFileManager(){return category.getSelectedItemPosition()==FILE_MANAGER;}
@@ -554,7 +1072,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         int next=effectiveLayout();boolean layoutChanged=next!=activeLayout;viewModeIcon(next);if(next==activeLayout&&results!=null)return;
         int position=results==null?0:results.getFirstVisiblePosition();
         int offset=results==null||results.getChildCount()==0?0:results.getChildAt(0).getTop()-results.getPaddingTop();
-        thumbnails.setFlinging(false);
+        thumbnails.setFlinging(false);appOwnerBadges.setFlinging(false);
         if(results!=null){results.setOnScrollListener(null);results.setAdapter(null);body.removeView(results);}
         activeLayout=next;
         if(skeleton!=null)skeleton.setStyle(next==3?LoadingSkeleton.GRID:LoadingSkeleton.LIST);
@@ -573,11 +1091,12 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         results.setPadding(results.getPaddingLeft(),results.getPaddingTop(),results.getPaddingRight(),dp(prefs.getBoolean("showStatus",true)?30:0));
         results.setOnItemClickListener((p,v,pos,id)->{if(longPressConsumed)return;FileEntry entry=adapter.fileAt(pos);if(entry!=null){if(selectionMode)toggle(entry,v);else{selected=entry;open(entry);}}
             else openDevice(adapter.deviceAt(pos));});
-        results.setOnItemLongClickListener((p,v,pos,id)->{FileEntry entry=adapter.fileAt(pos);if(entry==null)return false;beginSelection(entry,v);return true;});
+        results.setOnItemLongClickListener((p,v,pos,id)->{FileEntry entry=adapter.fileAt(pos);if(entry==null)return false;handleFileHold(entry,v);return true;});
         results.setOnScrollListener(new AbsListView.OnScrollListener(){public void onScrollStateChanged(AbsListView v,int state){
                 thumbnails.setFlinging(state == SCROLL_STATE_FLING);
+                appOwnerBadges.setFlinging(state == SCROLL_STATE_FLING);
             }
-            public void onScroll(AbsListView v,int first,int visible,int count){thumbnails.viewportChanged();updateSection(first);if(visible==0||searchRunning||restoringDeviceScroll)return;
+            public void onScroll(AbsListView v,int first,int visible,int count){thumbnails.viewportChanged();appOwnerBadges.viewportChanged();updateSection(first);if(visible==0||searchRunning||restoringDeviceScroll)return;
                 if(isDeviceCategory(category.getSelectedItemPosition())||mixedDeviceSearch){
                     if(first<=8&&firstDevicePage>0)loadDevicePage(true);
                     else if(first<=adapter.devices.size()&&first+visible>=adapter.devices.size()-16&&deviceNext!=null)loadDevicePage(false);
@@ -590,40 +1109,123 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private static boolean matchesType(FileEntry entry,int kind,int types){return kind==0&&types!=0?(types&(1<<FileTypes.category(entry)))!=0:FileTypes.matches(entry,kind);}
     private String typeLabel(){int first=0,count=Integer.bitCount(multiTypes);for(int type:new int[]{6,7,3,4,8,2,5,1})if((multiTypes&(1<<type))!=0){first=type;break;}
         return (first==1?"Other files":FileTypes.LABELS[first])+(count>1?" +"+(count-1):"");}
-    private void chooseTypes(){int[] types={6,7,3,4,8,2,5,1};String[] labels={"Photos","Videos","Audio","Documents","Archives","Folders","Executables","Other files"};
-        int kind=category.getSelectedItemPosition(),initial=multiTypes!=0?multiTypes:kind>=2&&kind<=8?1<<kind:kind==1?0x1FA:0x1FE;
-        boolean[] checked=new boolean[types.length];for(int n=0;n<types.length;n++)checked[n]=(initial&(1<<types[n]))!=0;
-        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("File types").setMultiChoiceItems(labels,checked,(d,which,on)->checked[which]=on)
-            .setNegativeButton("Cancel",null).setNeutralButton("All types",(d,w)->applyTypes(0)).setPositiveButton("Apply",null).create();
-        dialog.setOnShowListener(d->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{int mask=0;for(int n=0;n<types.length;n++)if(checked[n])mask|=1<<types[n];
-            if(mask==0){toast("Choose a file type");return;}applyTypes(mask==0x1FE?0:mask);dialog.dismiss();}));dialog.show();}
+    private void chooseTypes(){
+        int[] types={6,7,3,4,8,2,5,1};
+        int kind=category.getSelectedItemPosition(),all=0x1FE;
+        int[] selected={multiTypes!=0?multiTypes:kind>=2&&kind<=8?1<<kind:kind==1?0x1FA:all};
+        Menu model=theme.popup(this,category).getMenu();
+        for(int i=0;i<types.length;i++){
+            int type=types[i];
+            android.view.MenuItem item=model.add(0,type,i,type==1?"Other files":FileTypes.LABELS[type]);
+            item.setIcon(UiTheme.fileIcon(this,type));
+            item.setCheckable(true).setChecked((selected[0]&(1<<type))!=0);
+        }
+        if(navigationMenu!=null)navigationMenu.dismiss();
+        MenuDialog next=new MenuDialog(this,theme,category,model,"File types",2,label->{});
+        next.setLiveAction((menu,item)->{
+            selected[0]^=1<<item.getItemId();
+            item.setChecked((selected[0]&(1<<item.getItemId()))!=0);
+            return true;
+        });
+        Runnable updateChecks=()->{
+            for(int i=0;i<model.size();i++){
+                android.view.MenuItem item=model.getItem(i);
+                item.setChecked((selected[0]&(1<<item.getItemId()))!=0);
+            }
+        };
+        next.setFilterFooter(()->{selected[0]=all;updateChecks.run();},
+                ()->{selected[0]=0;updateChecks.run();},()->applyTypes(selected[0]==all?0:selected[0]),()->selected[0]!=0);
+        navigationMenu=next;
+        next.setOnDismissListener(dialog->{if(navigationMenu==next)navigationMenu=null;});
+        next.show();
+    }
     private void applyTypes(int mask){multiTypes=mask;subtype=null;prefs.edit().putInt("types",mask).putInt("filter",0).apply();category.setSelection(0);
         ((BaseAdapter)category.getAdapter()).notifyDataSetChanged();category.setContentDescription(mask==0?"Search category":"File types: "+typeLabel());
+        if(storageMap&&!mapSearchResults&&mask!=0){setStorageMap(true,true);return;}
         clearSelection();replaceResults();runSearch();}
     private void viewModeIcon(int style){if(viewMode!=null)viewMode.setImageResource(style==3?R.drawable.ic_grid:style==2?R.drawable.ic_compact:R.drawable.ic_list);}
-    private void chooseView(){
+    private Button makeGridPill(String label,String description){
+        Button pill=button(label);
+        pill.setTextColor(theme.ink);pill.setContentDescription(description);
+        pill.setTextSize(13);pill.setMinWidth(dp(48));pill.setMinimumWidth(dp(48));
+        pill.setPadding(dp(9),0,dp(9),0);pill.setStateListAnimator(null);
+        android.graphics.drawable.GradientDrawable fill=background(theme.chrome,24);
+        fill.setStroke(dp(1),theme.line);
+        android.graphics.drawable.InsetDrawable face=new android.graphics.drawable.InsetDrawable(
+                fill,dp(1),dp(9),dp(1),dp(9));
+        pill.setBackground(new android.graphics.drawable.RippleDrawable(
+                ColorStateList.valueOf(theme.dark?0x25FFFFFF:0x28155CCE),face,null));
+        pill.setPadding(dp(9),0,dp(9),0);
+        pill.setVisibility(View.GONE);
+        return pill;
+    }
+
+    private void chooseView(){chooseView(viewMode);}
+    private void chooseView(View anchor){
         boolean mapAvailable=!isDeviceCategory(category.getSelectedItemPosition());
-        String[] choices=mapAvailable?new String[]{"Automatic","List","Compact list","Grid","Storage map"}:new String[]{"Automatic","List","Compact list","Grid"};
-        new AlertDialog.Builder(this).setTitle("View").setSingleChoiceItems(choices,storageMap?4:layoutMode,(dialog,which)->{
-            dialog.dismiss();
-            if(which==4){setStorageMap(true);return;}
+        String[] choices={"Automatic","List","Compact list","Grid","Storage map","Map results"};
+        int[] icons={R.drawable.ic_menu_auto,R.drawable.ic_list,R.drawable.ic_compact,R.drawable.ic_grid,R.drawable.ic_locations,R.drawable.ic_grid};
+        Menu model=theme.popup(this,anchor).getMenu();
+        int count=mapAvailable?(isFileManager()?5:6):4;
+        for(int i=0;i<count;i++)model.add(choices[i]).setIcon(icons[i])
+                .setCheckable(true).setChecked((storageMap?(mapSearchResults?5:4):layoutMode)==i);
+        showMenu(anchor,model,"View",name->{
+            int which=Arrays.asList(choices).indexOf(name);
+            if(which<0)return;
+            if(which>=4){setStorageMap(true,which==5);return;}
             layoutMode=which;prefs.edit().putInt("view",which).apply();
             if(storageMap)setStorageMap(false);else replaceResults();
-        }).setNegativeButton("Close",null).show();
+        });
     }
-    private void setStorageMap(boolean enabled){
-        if(storageMap==enabled)return;
-        storageMap=enabled;mapList=false;clearSelection();browseRestore=null;
-        prefs.edit().putBoolean("storageMap",enabled).apply();
-        clearResultRows();adapter.notifyDataSetChanged();replaceResults();runSearch();
+    private void setStorageMap(boolean enabled){setStorageMap(enabled,false);}
+    private void setStorageMap(boolean enabled,boolean resultMap){
+        if(storageMap==enabled&&mapSearchResults==resultMap)return;
+        Bundle restore=null;
+        if(resultMap&&!storageMap){
+            resultMapReturn=browseLocation();
+            resultMapReturn.putInt("category",category.getSelectedItemPosition());
+            resultMapReturn.putInt("types",multiTypes);
+            resultMapReturn.putString("subtype",subtype);
+        }else if(!resultMap){
+            if(!enabled&&resultMapReturn!=null
+                    &&Objects.equals(folderScope,resultMapReturn.getString("scope"))
+                    &&query.getText().toString().equals(resultMapReturn.getString("query"))
+                    &&category.getSelectedItemPosition()==resultMapReturn.getInt("category")
+                    &&multiTypes==resultMapReturn.getInt("types")&&Objects.equals(subtype,resultMapReturn.getString("subtype")))
+                restore=resultMapReturn;
+            resultMapReturn=null;
+        }
+        storageMap=enabled;mapSearchResults=resultMap;mapList=false;setMapSizeBand(StorageMapData.UNKNOWN);clearSelection();browseRestore=restore;
+        if(enabled&&!resultMap&&folderScope==null)folderScope=internalStoragePath();
+        prefs.edit().putBoolean("storageMap",enabled).putBoolean("mapSearchResults",resultMap).apply();
+        clearResultRows();adapter.notifyDataSetChanged();replaceResults();runSearch();saveBrowseLocation();
+    }
+    private void setMapSizeBand(int band){
+        mapSizeBand=band;
+        mapView.highlightSizeBand(band);
+        for(int i=0;i<mapSizeSwatches.length;i++){
+            TextView swatch=mapSizeSwatches[i];
+            boolean selected=i==band;
+            GradientDrawable chip=background(mapView.fillColor(i),6);
+            if(selected)chip.setStroke(dp(2),INK);
+            swatch.setBackground(new android.graphics.drawable.InsetDrawable(chip,dp(2),dp(10),dp(2),dp(10)));
+            swatch.setSelected(selected);
+            String label=StorageMapView.SIZE_LABELS[i]+" files";
+            swatch.setTooltipText(selected?"Clear "+label.toLowerCase(java.util.Locale.ROOT)+" highlight":"Highlight "+label.toLowerCase(java.util.Locale.ROOT));
+            swatch.setContentDescription(selected?label+", highlighted. Tap to clear.":"Highlight "+label.toLowerCase(java.util.Locale.ROOT));
+        }
     }
     private void showMapList(boolean shown){
         mapList=shown;
-        mapListButton.setImageResource(shown?R.drawable.ic_grid:R.drawable.ic_list);
-        mapListButton.setContentDescription(shown?"Show storage map":"Show file list");
+        mapListButton.setImageResource(storageMap?R.drawable.ic_list:R.drawable.ic_grid);
+        mapListButton.setContentDescription(mapSearchResults?"Return to search results":storageMap?"Open folder in Files":"Show storage map");
+        mapListButton.setTooltipText(mapSearchResults?"Return to search results":storageMap?"Files · Hold to switch map layout":"Storage map");
         results.setVisibility(!storageMap||shown?View.VISIBLE:View.GONE);
         mapView.setVisibility(storageMap&&!shown?View.VISIBLE:View.GONE);
-        mapLegend.setVisibility(storageMap&&!shown?View.VISIBLE:View.GONE);
+        mapLegend.setVisibility(storageMap?View.VISIBLE:View.GONE);
+        mapSizeKey.setVisibility(shown?View.INVISIBLE:View.VISIBLE);
+        mapLayoutToggle.setText(shown?"Map":"List");
+        mapLayoutToggle.setContentDescription(shown?"Show map blocks":mapSearchResults?"List mapped results":"List folder contents");
         updateMapDetails();
         thumbnails.viewportChanged();
     }
@@ -646,50 +1248,142 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
                 label.setText(seeMore?"More":position==0?"All":choice.extension.isEmpty()?"No extension":choice.extension.toUpperCase(Locale.ROOT));
                 long total=0;if(position==0)for(FileSubtypes.Choice option:choices)total+=option.count;
                 value.setText(seeMore?"":format(position==0?total:choice.count));value.setVisibility(seeMore?View.GONE:View.VISIBLE);
-                label.setTextColor(checked?BLUE:INK);cell.setBackground(background(checked?theme.selected:theme.surface,8));
+                label.setTextColor(checked?BLUE:INK);cell.setBackground(background(checked?theme.selected:theme.chrome,8));
+                cell.setActivated(checked);
                 cell.setContentDescription(label.getText()+(seeMore?" file extensions":", "+value.getText()+((position==0?total:choice.count)==1?" file":" files"))+(checked?", selected":""));return cell;}
         });
         int height=Math.min(rowHeight*((count+columns-1)/columns)+dp(8),(int)(getResources().getDisplayMetrics().heightPixels*.45f));
-        PopupWindow window=new PopupWindow(grid,width,height,true);window.setBackgroundDrawable(background(theme.surface,12));window.setElevation(dp(8));
+        PopupWindow window=new PopupWindow(grid,width,height,true);window.setBackgroundDrawable(background(theme.chrome,14));window.setElevation(dp(8));
         window.setOutsideTouchable(true);window.setInputMethodMode(PopupWindow.INPUT_METHOD_NOT_NEEDED);subtypePopup=window;
         window.setOnDismissListener(()->{if(subtypePopup==window)subtypePopup=null;});
         grid.setOnItemClickListener((parent,view,position,id)->{window.dismiss();if(more&&position==count-1){showSubtypes(true);return;}
             subtype=position==0?null:choices.get(position-1).extension;clearSelection();runSearch();});
         window.showAsDropDown(subtypeButton,0,dp(4),Gravity.END);
     }
-    private void showSort(View anchor){PopupMenu p=theme.popup(this,anchor);String[] names={"Name","Path","Size","Modified"};for(int i=0;i<names.length;i++)p.getMenu().add(0,i,0,names[i]).setCheckable(true).setChecked((storageMap?mapSort:sort)==i);
-        p.getMenu().add(0,4,1,"Descending").setCheckable(true).setChecked(storageMap?mapDescending:descending);
-        p.setOnMenuItemClickListener(item->{
-            int choice=item.getItemId();
+    private void showSort(View anchor){
+        Menu model=theme.popup(this,anchor).getMenu();
+        String[] names={"Name","Path","Size","Modified","Descending"};
+        int[] icons={R.drawable.ic_rename,R.drawable.ic_folder,R.drawable.ic_menu_size,R.drawable.ic_history,R.drawable.ic_sort};
+        for(int i=0;i<names.length;i++)model.add(names[i]).setIcon(icons[i]).setCheckable(true)
+                .setChecked(i==4?(storageMap?mapDescending:descending):(storageMap?mapSort:sort)==i);
+        showMenu(anchor,model,"Sort",name->{
+            int choice=Arrays.asList(names).indexOf(name);
+            if(choice<0)return;
             if(storageMap){
                 if(choice==4)mapDescending=!mapDescending;else mapSort=choice;
                 prefs.edit().putInt("mapSort",mapSort).putBoolean("mapDescending",mapDescending).apply();
                 orderMap(true);
             }else{if(choice==4)descending=!descending;else sort=choice;runSearch();}
-            return true;
-        });p.show();}
-    private void searchOptions(){boolean[] checks={matchCase,wholeWord,matchPath,regex};new AlertDialog.Builder(this).setTitle("Search options")
-        .setMultiChoiceItems(new String[]{"Match case","Whole word","Match path","Regular expressions"},checks,(dialog,which,checked)->{
-            if(which==0)matchCase=checked;else if(which==1)wholeWord=checked;else if(which==2)matchPath=checked;else regex=checked;
-            prefs.edit().putBoolean("case",matchCase).putBoolean("word",wholeWord).putBoolean("path",matchPath).putBoolean("regex",regex).apply();clearSelection();runSearch();})
-        .setPositiveButton("Done",null).show();}
+        });
+    }
+    private void searchOptions(){
+        Menu model=theme.popup(this,optionsButton).getMenu();
+        addSearchMatching(model);
+        showMenu(optionsButton,model,"Search options",value->{});
+    }
+    private void addSearchMatching(Menu model){
+        String[] names={"Match case","Whole words","Include folder paths","Regular expressions"};
+        for(int i=0;i<names.length;i++)model.add(MATCH_OPTIONS,i+1,i,names[i]).setCheckable(true);
+        model.add(MATCH_OPTIONS,TYPO_MATCH_OPTION,names.length,"Typo-tolerant search").setCheckable(true);
+        model.add(MATCH_OPTIONS,RESET_MATCH_OPTIONS,names.length+1,"Reset matching options");
+        syncSearchMatching(model);
+    }
+    private void syncSearchMatching(Menu model){
+        for(int i=0;i<model.size();i++){
+            MenuItem item=model.getItem(i);
+            if(item.getGroupId()!=MATCH_OPTIONS)continue;
+            switch(item.getItemId()){
+                case 1:item.setChecked(matchCase);break;
+                case 2:item.setChecked(wholeWord);break;
+                case 3:item.setChecked(matchPath);break;
+                case 4:item.setChecked(regex);break;
+                case TYPO_MATCH_OPTION:item.setChecked(tolerateTypos);break;
+                case RESET_MATCH_OPTIONS:item.setEnabled(searchOptionsCount()>0);break;
+            }
+        }
+    }
+    private int searchOptionsCount(){return (matchCase?1:0)+(wholeWord?1:0)+(matchPath?1:0)+(regex?1:0)+(tolerateTypos?0:1);}
+    private void updateSearchOptionsBadge(){
+        if(optionsButton==null)return;
+        int count=searchOptionsCount();
+        String label=count==0?"Search options":"Search options, "+count+" active";
+        optionsButton.setActivated(count>0);
+        optionsButton.setImageTintList(ColorStateList.valueOf(count>0?BLUE:INK));
+        optionsButton.setContentDescription(label);
+        optionsButton.setTooltipText(label);
+    }
+    private boolean applyLiveSearchOption(Menu model,MenuItem item){
+        if(item.getGroupId()!=MATCH_OPTIONS)return false;
+        switch(item.getItemId()){
+            case 1:matchCase=!matchCase;break;
+            case 2:wholeWord=!wholeWord;break;
+            case 3:matchPath=!matchPath;break;
+            case 4:regex=!regex;break;
+            case TYPO_MATCH_OPTION:tolerateTypos=!tolerateTypos;break;
+            case RESET_MATCH_OPTIONS:matchCase=wholeWord=matchPath=regex=false;tolerateTypos=true;break;
+            default:return false;
+        }
+        prefs.edit().putBoolean("case",matchCase).putBoolean("word",wholeWord)
+                .putBoolean("path",matchPath).putBoolean("regex",regex).putBoolean("tolerateTypos",tolerateTypos).apply();
+        syncSearchMatching(model);updateSearchOptionsBadge();clearSelection();runSearch();
+        return true;
+    }
     private void showOverflow(View anchor){PopupMenu p=theme.popup(this,anchor);Menu m=p.getMenu();
-        SubMenu search=m.addSubMenu("Search");search.add("Search options");search.add("Clear search");search.add("Recent searches");search.add("Save search");search.add("Saved searches");
+        SubMenu search=m.addSubMenu("Search");
+        if(!isDeviceCategory(category.getSelectedItemPosition()))addSearchMatching(search);
+        search.add(0,0,10,"Recent searches");search.add(0,0,11,"Saved searches");
+        search.add(0,0,12,"Save search").setEnabled(!query.getText().toString().trim().isEmpty());
+        search.add(0,0,13,folderScope==null?"Clear search":"Clear search and folder")
+                .setEnabled(query.length()>0||folderScope!=null);
         SubMenu filters=m.addSubMenu("Filters");filters.add("File types");filters.add("Hidden files").setCheckable(true).setChecked(showHidden);
         SubMenu files=m.addSubMenu("File actions");files.add("Select all");files.add("Paste").setEnabled(FileClipboard.count(this)>0);files.add("Export results");
         SubMenu storage=m.addSubMenu("Storage");storage.add("Start location");SubMenu scope=storage.addSubMenu("Index scope");
         scope.add("Root folders").setCheckable(true).setChecked(index.isRootEnabled());scope.add("Shared storage").setCheckable(true).setChecked(!index.isRootEnabled());
         storage.add("File access");storage.add("Index statistics");
-        SubMenu appearance=m.addSubMenu("Appearance");appearance.add("Theme");appearance.add("Show status").setCheckable(true).setChecked(prefs.getBoolean("showStatus",true));appearance.add("Touch feedback").setCheckable(true).setChecked(prefs.getBoolean("haptics",true));
+        storage.add("Cleaner").setIcon(R.drawable.ic_cleaner);
+        storage.add("Duplicate finder").setIcon(R.drawable.ic_copy);
+        SubMenu appearance=m.addSubMenu("Appearance");appearance.add("Theme");appearance.add("Wallpaper tint").setCheckable(true).setChecked(prefs.getBoolean(AmbientPalette.PREFERENCE,true));appearance.add("Show status").setCheckable(true).setChecked(prefs.getBoolean("showStatus",true));appearance.add("Touch feedback").setCheckable(true).setChecked(prefs.getBoolean("haptics",true));
+        appearance.add(QuickPreviewCard.SETTING).setCheckable(true)
+                .setChecked(prefs.getBoolean(QuickPreviewCard.PREFERENCE,false));
+        m.add("Two-pane Files");
+        m.add("Workspace tabs");
+        m.add("Check for updates");
+        m.add("Guided tour");
         m.add("Help");
         if (FundingSupport.action(this) != null) m.add("Support development");
         showMenu(anchor,m,"More actions",this::action);}
+    private void showCategories(Spinner anchor){
+        Menu model=theme.popup(this,anchor).getMenu();
+        android.widget.SpinnerAdapter choices=anchor.getAdapter();
+        int current=anchor.getSelectedItemPosition();
+        for(int i=0;i<choices.getCount();i++){
+            int type=i==FILE_MANAGER?2:i;
+            android.view.MenuItem item=model.add(0,i+1,i,String.valueOf(choices.getItem(i)));
+            item.setIcon(UiTheme.fileIcon(this,type));
+            item.setIconTintList(UiTheme.fileTint(this,type));
+            item.setCheckable(true).setChecked(i==current);
+        }
+        final String filters="File types…";
+        model.add(0,choices.getCount()+1,choices.getCount(),filters).setIcon(R.drawable.ic_subtype)
+                .setIconTintList(ColorStateList.valueOf(theme.accent));
+        showMenu(anchor,model,"File category",2,label->{
+            if(filters.equals(label)){chooseTypes();return;}
+            for(int i=0;i<choices.getCount();i++)if(label.contentEquals(String.valueOf(choices.getItem(i)))){
+                anchor.setSelection(i);
+                break;
+            }
+        });
+    }
     private void showMenu(View anchor,Menu model,String title,java.util.function.Consumer<String> action){
+        showMenu(anchor,model,title,1,action);
+    }
+    private void showMenu(View anchor,Menu model,String title,int columns,java.util.function.Consumer<String> action){
         if(navigationMenu!=null)navigationMenu.dismiss();
-        MenuDialog next=new MenuDialog(this,theme,anchor,model,title,action);navigationMenu=next;
+        MenuDialog next=new MenuDialog(this,theme,anchor,model,title,columns,action);
+        next.setLiveAction(this::applyLiveSearchOption);navigationMenu=next;
         next.setOnDismissListener(dialog->{if(navigationMenu==next)navigationMenu=null;});next.show();}
     private void action(String value){switch(value){
-        case "Clear search":clearSearchAndFolder(true,true);break;
+        case "Clear search":case "Clear search and folder":clearSearchAndFolder(true,true);break;
         case "Select all":selectAll();break;case "Paste":paste();break;
         case "Root folders":switchStorage(true);break;case "Shared storage":switchStorage(false);break;
         case "Start location":chooseStartLocation();break;case "Search options":searchOptions();break;
@@ -703,64 +1397,214 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             try{startActivityForResult(create,20);}catch(Exception e){toast("No document picker available");}break;
         case "Index statistics":stats();break;case "File types":chooseTypes();break;
         case "File access":waitingPermission=true;openFileSettings();break;
+        case QuickPreviewCard.SETTING:
+            prefs.edit().putBoolean(QuickPreviewCard.PREFERENCE,
+                    !prefs.getBoolean(QuickPreviewCard.PREFERENCE,false)).apply();break;
         case "Touch feedback":prefs.edit().putBoolean("haptics",!prefs.getBoolean("haptics",true)).apply();break;
         case "Hidden files":showHidden=!showHidden;prefs.edit().putBoolean("showHidden",showHidden).apply();clearSelection();runSearch();break;
         case "Show status":prefs.edit().putBoolean("showStatus",!prefs.getBoolean("showStatus",true)).apply();updateStatusVisibility();break;
-        case "Theme":new AlertDialog.Builder(this).setTitle("Theme").setSingleChoiceItems(new String[]{"System","Light","Dark"},prefs.getInt("theme",0),(dialog,which)->{
+        case "Wallpaper tint":
+            prefs.edit().putBoolean(AmbientPalette.PREFERENCE,!prefs.getBoolean(AmbientPalette.PREFERENCE,true)).apply();
+            recreate();break;
+        case "Theme":new AlertDialog.Builder(this).setTitle("Theme").setSingleChoiceItems(new String[]{"System","Light","Dark"},prefs.getInt("theme",UiTheme.DEFAULT_MODE),(dialog,which)->{
             prefs.edit().putInt("theme",which).apply();dialog.dismiss();recreate();}).setNegativeButton("Close",null).show();break;
+        case "Two-pane Files":showDualPane();break;
+        case "Workspace tabs":showWorkspaceMenu(locationsButton);break;
+        case "Check for updates":
+            if(activeSheet!=null)activeSheet.dismiss();
+            AppSheet updates=AppUpdates.dialog(this);activeSheet=updates;
+            updates.setOnDismissListener(d->{if(activeSheet==updates)activeSheet=null;});
+            updates.show();break;
+        case "Guided tour":showGuidedTour();break;
         case "Help":
             if(activeSheet!=null)activeSheet.dismiss();
             AppSheet help=new HelpSheet(this,index).dialog();activeSheet=help;
             help.setOnDismissListener(d->{if(activeSheet==help)activeSheet=null;});
             help.show();break;
+        case "Cleaner":showCleaner(CleanerSheet.Mode.TEMP_CACHE);break;
+        case "Duplicate finder":showCleaner(CleanerSheet.Mode.DUPLICATES);break;
         case "Support development":
             Runnable funding = FundingSupport.action(this);
             if (funding != null) funding.run();
             break;
     }}
+    private void showCleaner(CleanerSheet.Mode firstMode){
+        if(isFinishing()||isDestroyed())return;
+        if(activeSheet!=null)activeSheet.dismiss();
+        Map<String,String> volumes=new LinkedHashMap<>();
+        String shared=Environment.getExternalStorageDirectory().getAbsolutePath();
+        if(dev.fastsearch.core.CleanerRules.isSharedVolumeRoot(shared))
+            volumes.put(shared,"Internal storage");
+        for(Map.Entry<String,String> volume:removableLocations().entrySet()){
+            String path=volume.getValue();
+            if(dev.fastsearch.core.CleanerRules.isSharedVolumeRoot(path))volumes.put(path,volume.getKey());
+        }
+        AppSheet sheet=CleanerSheet.create(this,index,volumes,CleanerReviewScanner.INSTANCE,
+                dismissed->{if(activeSheet==dismissed)activeSheet=null;},this::revealPreviewFile,firstMode);
+        activeSheet=sheet;
+        sheet.show();
+    }
+    private void showDualPane(){
+        if(isFinishing()||isDestroyed())return;
+        if(activeSheet!=null)activeSheet.dismiss();
+        AppSheet sheet=DualPaneManager.open(this,index,folderScope,internalStoragePath(),removableLocations(),
+                showHidden,dualPaneState,saved->dualPaneState=saved,
+                intent->startActivityForResult(intent,DualPaneManager.PREVIEW_REQUEST),
+                dismissed->{if(activeSheet==dismissed)activeSheet=null;},this::prepareFileAction,this::properties,this::copyPath,appOwnerBadges);
+        activeSheet=sheet;
+        sheet.show();
+    }
+    private void showGuidedTour(){
+        if(spotlightTour!=null)spotlightTour.close();
+        if(activeSheet!=null)activeSheet.dismiss();
+        query.dismissDropDown();query.clearFocus();
+        getSystemService(android.view.inputmethod.InputMethodManager.class).hideSoftInputFromWindow(query.getWindowToken(),0);
+        SpotlightTour.Step find=tourControl("Find by name","Type part of the filename. Add ext:pdf to find PDFs.",()->query);
+        SpotlightTour.Step sidebar=tourControl("Open the sidebar","The icon beside Search opens views, folders and storage.",()->locationsButton);
+        SpotlightTour.Step browse=tourSidebar("Browse a folder","Files shows the current folder. Tap a folder to go inside or use the breadcrumb to jump to a path.","Files");
+        SpotlightTour.Step map=tourSidebar("See what takes up space","Larger blocks hold more data, and color marks the size range. Tap a folder block to open its own map.","Storage map");
+        SpotlightTour.Step tabs=tourSidebar("Keep another folder open","Create a tab here. Drag its grip to reorder tabs without moving files.","Workspace tabs");
+        SpotlightTour.Step layout=tourControl("Switch the result layout","View offers Automatic, List, Compact list and Grid. Storage map is available when browsing files.",()->viewMode);
+        SpotlightTour.Step sort=tourControl("Sort results","Sort by Name, Path, Size or Modified. Turn on Descending to reverse the order.",()->sortButton);
+        SpotlightTour.Step preview=tourControl("Open a preview","Tap a supported file to open it here. Use the preview arrows or swipe to see neighboring files, then use Back to return.",()->results.isShown()&&!isDeviceCategory(category.getSelectedItemPosition())?results:viewMode);
+        java.util.List<SpotlightTour.Topic> topics=Arrays.asList(
+            new SpotlightTour.Topic("Search & filters","Search terms, file types and saved searches.",
+                find,
+                tourControl("Combine search terms","Use quotes for an exact phrase, | for alternatives and ! to exclude a term. Try ext:jpg;png or size:>10mb.",()->query),
+                tourControl("Filter by file type","Tap the category for two columns. Pick a type, or open File types… to combine several. Clear starts a new selection; All resets it. Tap Apply to use the filter.",()->category),
+                tourControl("Search options","Match case, match whole words, search paths, or use a regular expression. These settings stay on until you change them.",()->optionsButton),
+                tourControl("Save or revisit a search","More actions → Search has recent and saved searches. More actions → Filters also includes hidden files.",()->findViewById(R.id.overflow)),
+                tourControl("Refresh or export","Refresh updates the current files or index. Cancel an active index scan with the same control. Export results to CSV under More actions → File actions.",()->refresh)),
+            new SpotlightTour.Topic("Files, storage & tree","Browse folders, check space and find saved locations.",
+                sidebar,browse,
+                tourControl("Move around a folder","Use the Up arrow to return or tap the breadcrumb to edit the path. The clock opens folder history and bookmarks.",()->folderBar.isShown()?folderPath:locationsButton),
+                tourSidebar("Open the folder tree","In the sidebar's Folders section, open Folder tree to expand folders without leaving your current view. Choose where to browse when you're ready.","Folder tree"),
+                tourSidebar("Recent & saved folders","Recall a recently opened folder or bookmark the current one. Downloads, Documents and Pictures have their own shortcuts.","Recent & saved"),
+                tourControl("Check used and available space","The sidebar lists Internal storage and any detected removable volumes. Each volume shows space used and available when Android can report it.",()->locationsButton),
+                tourControl("File access and start location","More actions → Storage manages shared storage access, the start location and index statistics. Device root needs a separate, explicit root grant.",()->findViewById(R.id.overflow))),
+            new SpotlightTour.Topic("Map, Sort & View","Read the map, change the layout and set the order.",
+                map,
+                tourControl("Map your search results","Choose View, then Map results to compare sizes in a file category or search. Map and List show the same matches. Storage map instead measures what is inside a folder.",()->viewMode),
+                tourControl("Browse while in Map","Search within the current folder or tap the list icon on the breadcrumb bar to open that folder in Files. Hold it to switch between map blocks and the map list.",()->mapListButton.isShown()?mapListButton:viewMode),
+                tourControl("Read the map legend","Color compares file sizes from blue to red. Tap a color to highlight that size, or tap it again to clear. Folder blocks still open, and List reaches every item.",()->mapLegend.isShown()?mapLegend:locationsButton),
+                sort,layout),
+            new SpotlightTour.Topic("Tabs & two panes","Keep different folders open and transfer between panes.",
+                tabs,
+                tourControl("Switch windows","Use this button to switch workspace tabs, resume or close a preview, or reopen your two-pane folders.",()->windowsButton()),
+                tourSidebar("Browse two folders","Open Two-pane Files from the sidebar. Choose a folder in each pane and tap a pane to make it active.","Two-pane Files"),
+                tourSidebar("Transfer between panes","Select files in one pane, leave the destination open in the other, then choose Copy or Move. Check the source and destination before confirming.","Two-pane Files")),
+            new SpotlightTour.Topic("Previews & file actions","Use the viewer, hold-and-slide menu and selection.",
+                preview,
+                tourControl("Preview tools depend on the file","Images can zoom, PDFs have page arrows, audio and video have playback controls, and supported documents and ZIPs have their own view. Open a file and choose More file actions → Viewer guide.",()->viewMode),
+                tourControl("Hold, slide, then choose","Hold a file to open the two-column actions. Keep holding and slide over another file to change the highlighted row and details. Lift your finger, then tap an action.",()->results.isShown()?body:mapListButton),
+                tourControl("Work on one file or several","The file menu includes Share, Open with, Properties and Copy path. Choose Select items to handle several files; Rename and Delete are separate actions.",()->results.isShown()?body:mapListButton),
+                tourControl("Copy, move and paste","Choose Copy or Move, open your destination folder and tap Paste. The guide does not select, move or delete anything.",()->pasteButton.isShown()?pasteButton:findViewById(R.id.overflow))),
+            new SpotlightTour.Topic(BuildConfig.SMS_ENABLED?"Apps, contacts & SMS":"Apps & contacts","Search apps and use optional device categories.",
+                tourControl("Find installed apps","Choose Apps in the category picker. Results show real app icons, and tapping a result opens that app.",()->category),
+                tourControl("Find a contact","Choose Contacts and grant Android access only if you want to search your address book. Tap a result to see contact details.",()->category),
+                BuildConfig.SMS_ENABLED
+                    ?tourControl("Find a text message","In this edition, choose SMS and allow access if you want to search by sender or message. The guide won't ask for that permission.",()->category)
+                    :tourControl("Downloaded APKs","Browse Downloads in Files to find APKs on your storage. These are files, not installed apps.",()->locationsButton)),
+            new SpotlightTour.Topic("Settings, help & updates","Find settings, get help and check for an update.",
+                tourControl("Change the appearance","More actions → Appearance includes the theme, status line, touch feedback and the optional Quick preview file menu.",()->findViewById(R.id.overflow)),
+                tourControl("Get help or report a problem","More actions → Help has a Quick start, troubleshooting and bug reporting. Diagnostics are optional; review the report before sending it.",()->findViewById(R.id.overflow)),
+                tourControl("Check for updates","Use More actions → Check for updates. See your installed version and the update link for this edition. Anything doesn't download or install updates in the background.",()->findViewById(R.id.overflow)))
+        );
+        spotlightTour=new SpotlightTour(this,()->{spotlightTour=null;closeTourDrawer();},topics,this::closeTourDrawer,
+                find,sidebar,browse,map,tabs,layout,sort,preview);
+        spotlightTour.start();
+    }
+    private SpotlightTour.Step tourControl(String title,String description,java.util.function.Supplier<View> target){
+        return new SpotlightTour.Step(title,description,()->{closeTourDrawer();return target.get();});
+    }
+    private SpotlightTour.Step tourSidebar(String title,String description,String label){
+        return new SpotlightTour.Step(title,description,()->tourDrawerTarget(label));
+    }
+    private View tourDrawerTarget(String label){
+        if(storageDrawer==null)showLocations(locationsButton);
+        return storageDrawer==null?locationsButton:storageDrawer.findAction(label);
+    }
+    private void closeTourDrawer(){
+        StorageDrawer current=storageDrawer;storageDrawer=null;
+        if(current!=null)current.dismiss();
+    }
     private void updateSearchControls(){
         boolean scoped=folderScope!=null&&!isDeviceCategory(category.getSelectedItemPosition()),hasQuery=query.length()>0;
         boolean back=scoped&&canGoUp();
-        boolean visible=back||(hasQuery&&!storageMap);
+        boolean visible=back||hasQuery;
+        displayFolderOverview();
         folderBar.setVisibility(isFolderView()?View.VISIBLE:View.GONE);
-        folderPath.setText(storageMap?mapScope():folderScope);folderUp.setEnabled(back);folderUp.setAlpha(back?1f:.38f);
-        boolean editable=isFileManager()&&!storageMap;
+        folderPath.setText(mapSearchResults?(scoped?"Map results · "+displayFolderPath(folderScope):"Map results")
+                :displayFolderPath(storageMap?mapScope():folderScope));
+        folderUp.setEnabled(back);folderUp.setAlpha(back?1f:.38f);
+        folderUp.setVisibility(mapSearchResults&&!back?View.GONE:View.VISIBLE);
+        folderUp.setContentDescription(atOverviewVolume()?"Back to storage overview":"Parent folder");
+        boolean editable=isFolderView()&&(!mapSearchResults||scoped);
         folderPath.setClickable(editable);folderPath.setFocusable(editable);
         folderPath.setContentDescription(editable?"Edit folder path, "+folderScope:null);
         folderHistoryButton.setVisibility(editable?View.VISIBLE:View.GONE);
-        query.setEnabled(!storageMap);mapListButton.setVisibility(storageMap?View.VISIBLE:View.GONE);
+        query.setEnabled(true);mapListButton.setVisibility(isFolderView()?View.VISIBLE:View.GONE);
         updateRefreshControl();
         showMapList(mapList);
         clearSearch.setVisibility(visible?View.VISIBLE:View.GONE);query.setPadding(dp(48),0,dp(visible?48:6),0);
         String folder=scoped?new File(folderScope).getName():"";
         boolean rootFolder="/".equals(folderScope),internalFolder=scoped&&internalStoragePath().equals(folderScope);
-        String location=!scoped?getString(R.string.app_name):rootFolder?"Root":internalFolder?"Internal storage":folder;
-        query.setHint(!scoped?"Search":rootFolder?"Search root":internalFolder?"Search internal storage":"Search in "+folder);
-        query.setContentDescription(scoped?"Search in "+folderScope:BuildConfig.SMS_ENABLED?"Search files, apps, contacts and SMS":"Search files, apps and contacts");
-        String description=back?"Back to previous folder":"Clear search";
+        android.content.res.Configuration viewport=getResources().getConfiguration();
+        boolean shortHint=viewport.screenWidthDp>0&&(viewport.screenWidthDp<=340
+                ||viewport.screenWidthDp<=380&&viewport.fontScale>=1.2f);
+        query.setHint(shortHint?"Search":!scoped?(mapSearchResults?"Search mapped files":"Search")
+                :rootFolder?"Search root":internalFolder?"Search internal storage":"Search in "+folder);
+        query.setContentDescription(scoped?"Search in "+folderScope:mapSearchResults?"Search mapped files":BuildConfig.SMS_ENABLED?"Search files, apps, contacts and SMS":"Search files, apps and contacts");
+        String description=hasQuery?"Clear search":back?"Back to previous folder":"Clear search";
         clearSearch.setContentDescription(description);clearSearch.setTooltipText(scoped?folderScope:description);
         locationsButton.setImageTintList(ColorStateList.valueOf(scoped?BLUE:MUTED));
-        locationsButton.setContentDescription("Browse locations: "+location);locationsButton.setTooltipText(scoped?folderScope:"Browse locations");
+        locationsButton.setContentDescription("Open sidebar");locationsButton.setTooltipText("Storage and navigation");
+    }
+    private String displayFolderPath(String path){
+        if(path==null)return "";
+        if("/".equals(path))return "Device root";
+        String internal=internalStoragePath();
+        if(isInside(path,internal))return breadcrumb("Internal storage",path.substring(internal.length()));
+        String shared=Environment.getExternalStorageDirectory().getAbsolutePath();
+        if(isInside(path,shared))return breadcrumb("Internal storage",path.substring(shared.length()));
+        if(cacheRootForLabels!=null&&isInside(path,cacheRootForLabels)){
+            if(path.length()<=cacheRootForLabels.length()+1)return "Test files";
+            String remainder=path.substring(cacheRootForLabels.length()+1);
+            int slash=remainder.indexOf('/');
+            return breadcrumb("Test files",slash<0?"":remainder.substring(slash));
+        }
+        if(path.startsWith("/storage/")){
+            int end=path.indexOf('/',"/storage/".length());
+            if(end>0)return breadcrumb(path.substring("/storage/".length(),end),path.substring(end));
+        }
+        return path;
+    }
+    private static String breadcrumb(String first,String relative){
+        return relative.isEmpty()?first:first+relative.replace("/", "  ›  ");
     }
     private void clearSearchOrFolder(){
-        if(!isDeviceCategory(category.getSelectedItemPosition())&&canGoUp()){backFolder();return;}clearSearchAndFolder(true,false);
+        if(query.length()>0){clearSearchAndFolder(true,false);return;}
+        if(!isDeviceCategory(category.getSelectedItemPosition())&&canGoUp())backFolder();
     }
     private void showClearOptions(){
         if(folderScope==null){clearSearchAndFolder(true,false);return;}
-        PopupMenu menu=theme.popup(this,clearSearch);for(String label:new String[]{"Clear search","Clear folder","Clear both"})menu.getMenu().add(label);
-        menu.setOnMenuItemClickListener(item->{String label=item.getTitle().toString();clearSearchAndFolder(!label.equals("Clear folder"),!label.equals("Clear search"));return true;});menu.show();
+        Menu model=theme.popup(this,clearSearch).getMenu();
+        model.add("Clear search").setIcon(R.drawable.ic_search);
+        model.add("Clear folder").setIcon(R.drawable.ic_folder);
+        model.add("Clear both").setIcon(R.drawable.ic_close);
+        showMenu(clearSearch,model,"Clear",label->clearSearchAndFolder(!label.equals("Clear folder"),!label.equals("Clear search")));
     }
     private void clearSearchAndFolder(boolean text,boolean folder){
         clearSelection();if(folder){folderScope=rootHome!=null?rootHome:isFileManager()?internalStoragePath():null;folderHistory.clear();browseRestore=null;}
         if(text&&query.length()>0)query.setText("");else runSearch();
         saveBrowseLocation();
     }
-    private void switchStorage(boolean root){if(root==index.isRootEnabled())return;clearResultRows();clearSelection();rootHome=null;folderHistory.clear();browseRestore=null;
+    private void switchStorage(boolean root){if(root==index.isRootEnabled())return;clearResultRows();clearSelection();rootHome=null;overviewVolumeRoot=null;folderHistory.clear();browseRestore=null;
         folderScope=null;index.setRootEnabled(root);if(isFileManager())folderScope=internalStoragePath();
         initialRequested=true;runSearch();saveBrowseLocation();startIndexing();}
     private void openFileSettings(){try{startActivity(new Intent(Build.VERSION.SDK_INT>=30?Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION:Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));}catch(Exception failure){startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())));}}
     private void offerFileAccess(){
-        if((BuildConfig.DEBUG&&probeIndex==index)||isFinishing()||index.isRootEnabled()||FileIndex.hasAccess(this)
+        if(!BuildConfig.DEBUG||!permissionProbe||probeIndex==index||isFinishing()||index.isRootEnabled()||FileIndex.hasAccess(this)
                 ||prefs.getBoolean("fileAccessIntroShown",false))return;
         prefs.edit().putBoolean("fileAccessIntroShown",true).apply();
         new AlertDialog.Builder(this).setTitle("File access")
@@ -790,14 +1634,15 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         if(next.error!=null&&!next.error.isEmpty())showError(next.error);
         boolean entriesChanged=next.entries!=lastEntries;
         if(entriesChanged||changed){lastEntries=next.entries;
-            if(!searchRunning&&!isDeviceCategory(category.getSelectedItemPosition())&&(!isFolderView()||entriesChanged))updateFiles();}
+            if(!searchRunning&&!isDeviceCategory(category.getSelectedItemPosition())&&(!isFolderView()||entriesChanged)
+                    &&!applyingLiveRootDelta())updateFiles();}
         if(next.loaded&&!next.scanning&&!initialRequested){initialRequested=true;checkUpdates();}
         updateEmpty();}
     private void updateRefreshControl(){
-        boolean indexing=state.scanning&&!isFolderView();
+        boolean indexing=state.scanning&&(!isFolderView()||mapSearchResults);
         progress.setVisibility(indexing?View.VISIBLE:View.GONE);
         refresh.setImageResource(indexing?R.drawable.ic_stop:R.drawable.ic_refresh);
-        refresh.setContentDescription(storageMap?"Refresh storage map":isFileManager()?"Refresh folder":indexing?"Stop indexing":"Refresh index");
+        refresh.setContentDescription(mapSearchResults?(indexing?"Stop indexing":"Refresh index"):storageMap?"Refresh storage map":isFileManager()?"Refresh folder":indexing?"Stop indexing":"Refresh index");
         refresh.setTooltipText(refresh.getContentDescription());
     }
     private void updateStatusVisibility(){if(status==null)return;boolean shown=prefs.getBoolean("showStatus",true);
@@ -812,20 +1657,34 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         if(field==3)return (entry.modified>0?DateFormat.getDateTimeInstance().format(new Date(entry.modified)):"Date unknown")+" · "+entry.name;
         return entry.name;
     }
+    private boolean gridCanSelect(){
+        return activeLayout==3&&!storageMap&&adapter!=null&&!adapter.items.isEmpty()
+                &&provisionalSearchKey==null&&!(isFileManager()&&searchRunning&&!refreshResults);
+    }
     private void updateSection(int position){
         if(sectionLabel==null||results==null)return;
-        boolean visible=!isFolderView()&&!adapter.items.isEmpty();sectionLabel.setVisibility(visible?View.VISIBLE:View.GONE);
-        if(visible){DeviceSearch.Result device=adapter.deviceAt(position);
+        boolean grid=gridCanSelect(), hasSection=!isFolderView()&&!adapter.items.isEmpty();
+        boolean visible=hasSection;
+        int top=hasSection?dp(24):0;
+        sectionLabel.setVisibility(visible?View.VISIBLE:View.GONE);
+        boolean offerSelection=grid&&!selectionMode;
+        if(gridSelect!=null)gridSelect.setVisibility(offerSelection?View.VISIBLE:View.GONE);
+        if(gridModePill!=null)gridModePill.setVisibility(offerSelection?View.VISIBLE:View.GONE);
+        int end=dp(offerSelection?156:16);
+        if(sectionLabel.getPaddingEnd()!=end)sectionLabel.setPaddingRelative(dp(12),0,end,0);
+        if(visible){
+            DeviceSearch.Result device=adapter.deviceAt(position);
             String label=device==null?adapter.sections.labelAt(Math.max(0,position-adapter.devices.size())):FileTypes.LABELS[device.domain+8];
-            if(!TextUtils.equals(sectionLabel.getText(),label))sectionLabel.setText(label);}
+            if(!TextUtils.equals(sectionLabel.getText(),label))sectionLabel.setText(label);
+        }
         FrameLayout.LayoutParams layout=(FrameLayout.LayoutParams)results.getLayoutParams();
-        int top=visible?dp(24):0;if(layout!=null&&layout.topMargin!=top){layout.topMargin=top;results.setLayoutParams(layout);}
+        if(layout!=null&&layout.topMargin!=top){layout.topMargin=top;results.setLayoutParams(layout);}
     }
     private void checkUpdates(){if(!state.loaded||state.scanning||state.lastScanMillis==0
             ||(BuildConfig.DEBUG&&permissionProbe)||probeIndex==index||(!index.isRootEnabled()&&!FileIndex.hasAccess(this)))return;
         index.discoverOnOpen(folderScope);
         index.checkChanges();}
-    private SearchQuery.Options options(){SearchQuery.Options o=new SearchQuery.Options();o.matchCase=matchCase;o.wholeWord=wholeWord;o.matchPath=matchPath;o.regex=regex;return o;}
+    private SearchQuery.Options options(){SearchQuery.Options o=new SearchQuery.Options();o.matchCase=matchCase;o.wholeWord=wholeWord;o.matchPath=matchPath;o.regex=regex;o.tolerateTypos=tolerateTypos;return o;}
     private Comparator<FileEntry> comparator(int field,boolean reverse){Comparator<FileEntry> c;
         Comparator<FileEntry> byName=Comparator.comparing((FileEntry entry)->entry.name,String.CASE_INSENSITIVE_ORDER)
                 .thenComparing(FileEntry::comparePath);
@@ -837,27 +1696,120 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         return reverse?c.reversed():c;}
     private void refreshOpenFolder(){
         if(hasWindowFocus()){
-            if(isFileManager()&&!storageMap&&!searchRunning)updateFiles();
-            if(state.loaded&&state.lastScanMillis>0){
-                String folder=folderScope;
+            String folder=storageMap&&!mapSearchResults?mapScope():folderScope;
+            maintainRootWatch(visibleRootFolder());
+            boolean indexed=state.loaded&&state.lastScanMillis>0;
+            if(indexed){
                 try{fileActions.execute(()->index.probeForegroundChanges(folder));}
                 catch(RejectedExecutionException ignored){}
             }
+            // A slow direct listing still catches non-Root folders without an index.
+            // Never auto-poll a privileged folder that could not arm its scoped watcher.
+            if(isFileManager()&&!storageMap&&!searchRunning&&!index.isRootEnabled()&&
+                    (!indexed||!index.supportsForegroundCheck(folder))){
+                long now=android.os.SystemClock.elapsedRealtime();
+                if(now-lastFolderCheck>=UNINDEXED_FOLDER_CHECK_MS){lastFolderCheck=now;updateFiles();}
+            }
         }
-        ui.postDelayed(folderRefresh,5000);
+        ui.postDelayed(folderRefresh,FOREGROUND_CHANGE_CHECK_MS);
     }
+    private String visibleRootFolder(){
+        if(index==null||!hasWindowFocus()||mapSearchResults||!isFolderView())return null;
+        String folder=storageMap?mapScope():folderScope;
+        return index.supportsLiveRootFolder(folder)?folder:null;
+    }
+    private boolean applyingLiveRootDelta(){
+        return rootDeltaScope!=null&&isFolderView()&&!mapSearchResults
+                &&rootDeltaScope.equals(storageMap?mapScope():folderScope);
+    }
+    private void cancelRootWatch(){
+        CancellationSignal signal=rootWatchCancellation;
+        rootWatchCancellation=null;
+        rootWatchScope=null;
+        rootWatchReady=null;
+        if(rootWatchDeadline!=null){ui.removeCallbacks(rootWatchDeadline);rootWatchDeadline=null;}
+        if(signal!=null)signal.cancel();
+    }
+    private void maintainRootWatch(String folder){
+        if(!Objects.equals(rootWatchScope,folder)||rootWatchMap!=storageMap)cancelRootWatch();
+        if(folder==null||rootWatchCancellation!=null||rootDeltaScope!=null||rootWatches.isShutdown())return;
+        if(!Objects.equals(rootWatchVisit,folder)){rootWatchVisit=folder;rootWatchFailedScope=null;}
+        if(Objects.equals(rootWatchFailedScope,folder))return;
+        if(storageMap&&(searchRunning||!Objects.equals(folder,mapRowsScope)))return;
+        List<String> candidates=new ArrayList<>();
+        if(storageMap)for(StorageMapData.Tile tile:mapTiles){
+            if(tile.entry.directory)candidates.add(tile.entry.path());
+            if(candidates.size()>=IndexRootScanner.LIVE_WATCH_LIMIT-1)break;
+        }
+        final boolean map=storageMap;
+        final CancellationSignal request=new CancellationSignal();
+        final java.util.concurrent.atomic.AtomicBoolean ready=new java.util.concurrent.atomic.AtomicBoolean();
+        rootWatchScope=folder;rootWatchMap=map;rootWatchCancellation=request;rootWatchReady=ready;
+        rootWatchDeadline=()->{
+            if(rootWatchCancellation!=request)return;
+            rootWatchFailedScope=folder;
+            cancelRootWatch();
+        };
+        ui.postDelayed(rootWatchDeadline,34_000);
+        try{rootWatches.execute(()->{
+            IndexRootScanner.LiveChanges changes=null;
+            try{changes=index.watchRootFolder(folder,candidates,request,()->ready.set(true));}
+            catch(java.io.IOException|java.util.concurrent.CancellationException|android.os.OperationCanceledException unavailable){/* Existing shallow check remains available. */}
+            final IndexRootScanner.LiveChanges result=changes;
+            ui.post(()->{
+                if(rootWatchCancellation!=request)return;
+                rootWatchCancellation=null;
+                rootWatchReady=null;
+                if(rootWatchDeadline!=null){ui.removeCallbacks(rootWatchDeadline);rootWatchDeadline=null;}
+                if(!Objects.equals(folder,visibleRootFolder())||map!=storageMap)return;
+                if(result==null){
+                    rootWatchFailedScope=folder;
+                    return;
+                }
+                // Rearm on the normal focused cadence. Never call su in a background loop.
+                if(!result.changed())return;
+                if(result.paths.isEmpty())refreshChangedRootView(folder,map,result);
+                else {
+                    rootDeltaScope=folder;
+                    index.reconcileLiveRootPaths(folder,result).whenComplete((stats,failure)->ui.post(()->{
+                        rootDeltaScope=null;
+                        if(failure==null&&(result.overflow||stats!=null&&stats.optInt("changedRows")>0))
+                            refreshChangedRootView(folder,map,result);
+                    }));
+                }
+            });
+        });}catch(RejectedExecutionException busy){cancelRootWatch();}
+    }
+    private void refreshChangedRootView(String folder,boolean map,IndexRootScanner.LiveChanges identity){
+        if(!Objects.equals(folder,visibleRootFolder())||map!=storageMap)return;
+        // Root events may not trigger the general (explicit user navigation) scanner.
+        runSearch(true,identity);
+    }
+
     private void updateFiles(){runSearch(!searchRunning||refreshResults);}
     private void runSearch(){runSearch(false);}
-    private void runSearch(boolean refreshViewport){if(query==null||state==null||searches.isShutdown())return;
-        boolean map=storageMap,manager=isFileManager()&&!map;
-        int ticket=sequence.incrementAndGet(),kind=manager||map?0:category.getSelectedItemPosition(),field=sort,types=manager||map?0:multiTypes;
+    private void runSearch(boolean refreshViewport){runSearch(refreshViewport,null);}
+    private void runSearch(boolean refreshViewport,IndexRootScanner.LiveChanges liveIdentity){if(query==null||state==null||searches.isShutdown())return;
+        boolean map=storageMap,resultMap=mapSearchResults,folderMap=map&&!resultMap,manager=isFileManager()&&!map;
+        if((folderMap||manager)&&probeIndex!=index&&!index.isRootEnabled()&&!FileIndex.hasAccess(this)){
+            sequence.incrementAndGet();
+            if(pending!=null)pending.cancel(true);
+            if(deviceCancellation!=null)deviceCancellation.cancel();
+            clearResultRows();adapter.notifyDataSetChanged();
+            searchRunning=false;refreshResults=false;
+            message.setVisibility(View.GONE);status.setText("File access is off");
+            updateSearchControls();updateEmpty();return;
+        }
+        int ticket=sequence.incrementAndGet(),kind=manager||folderMap?0:category.getSelectedItemPosition(),field=sort,types=manager||folderMap?0:multiTypes;
         boolean reverse=descending,includeHidden=showHidden;
-        String input=map?"":query.getText().toString(),scope=map?mapScope():isDeviceCategory(kind)?null:folderScope,extension=map?null:subtype;
+        String input=folderMap?"":query.getText().toString(),scope=folderMap?mapScope():isDeviceCategory(kind)?null:folderScope,extension=folderMap?null:subtype;
+        if(rootWatchCancellation!=null&&((!folderMap&&!manager)||rootWatchMap!=map||!Objects.equals(rootWatchScope,scope)))cancelRootWatch();
+
         SearchQuery.Options opts=options();List<FileEntry> entries=state.entries;
         boolean fileSearch = !manager && !map && kind < 9;
         String searchKey = fileSearch ? new JSONArray().put(index.isRootEnabled()).put(kind).put(types)
                 .put(field).put(reverse).put(includeHidden).put(input).put(scope).put(extension)
-                .put(opts.matchCase).put(opts.wholeWord).put(opts.matchPath).put(opts.regex).toString() : null;
+                .put(opts.matchCase).put(opts.wholeWord).put(opts.matchPath).put(opts.regex).put(opts.tolerateTypos).toString() : null;
         if (saveSearchRows != null) ui.removeCallbacks(saveSearchRows);
         if (provisionalSearchKey != null && !Objects.equals(provisionalSearchKey, searchKey)) {
             clearResultRows();
@@ -888,7 +1840,8 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         }
         final CancellationSignal cancellation=new CancellationSignal();deviceCancellation=cancellation;searchRunning=true;refreshResults=refreshViewport;
         List<FileEntry> previousRows=adapter.items;
-        if(map)status.setText(mapTotalBytes>0?size(mapTotalBytes)+" • Checking storage…":"Checking storage…");
+        if(resultMap)status.setText(state.loaded?"Mapping indexed results…":"Loading index…");
+        else if(map)status.setText(mapTotalBytes>0?size(mapTotalBytes)+" • Checking storage…":"Checking storage…");
         else if(adapter.items.isEmpty()&&kind<9)status.setText(state.loaded||manager?"Loading results…":"Loading index…");
         mixedDeviceSearch=!manager&&!map&&kind==0&&types==0&&scope==null&&input.trim().length()>=2&&!regex&&!input.contains(":")&&!input.contains("|");
         boolean combined=mixedDeviceSearch;boolean preserveDevices=refreshViewport&&!devicePages.isEmpty();
@@ -896,7 +1849,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         if(!preserveDevices){devicePages.clear();deviceStarts.clear();deviceStarts.add(null);deviceOffsets.clear();deviceOffsets.add(0L);firstDevicePage=0;deviceNext=null;}
         updateEmpty();
         try{pending=searches.submit(()->{long begin=System.nanoTime();try{
-            List<FileEntry> candidates=manager?index.listFolder(scope,cancellation):entries;
+            List<FileEntry> candidates=manager?index.listFolder(scope,cancellation,liveIdentity):entries;
             boolean reuse=!manager&&!map&&kind==0&&types==0&&extension==null&&scope==null&&field==0&&!reverse&&includeHidden&&input.trim().isEmpty()&&!opts.regex;
             boolean rootOverview=!manager&&!map&&kind==0&&types==0&&extension==null&&"/".equals(scope)
                     &&input.trim().isEmpty()&&!opts.regex;
@@ -907,8 +1860,42 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             List<FileEntry> matchesInOrder=reuseRoot?cached.rows:reuse?entries:new ArrayList<>();
             long count=matchesInOrder.size();Map<String,Integer> extensionCounts=new HashMap<>();
             List<StorageMapData.Tile> tiles;
+            StorageMapData.Analysis analysis;
             int unreadable;
-            if(map){
+            boolean usedTypoFallback=false;
+            if(resultMap){
+                SearchQuery matcher=SearchQuery.compile(input,opts);
+                String scopePrefix=scope==null?null:scope.endsWith("/")?scope:scope+"/";
+                StorageMapData.ResultTiles mapped=new StorageMapData.ResultTiles();
+                int mappedCount=0;
+                for(int pass=0;pass<(matcher.hasTypoFallback()?2:1)&&mappedCount==0;pass++){
+                    boolean fuzzy=pass!=0;
+                    int inspected=0;
+                    for(int i=0;i<entries.size();i++){
+                        if((i&511)==0)cancellation.throwIfCanceled();
+                        FileEntry entry=entries.get(i);
+                        if(!includeHidden&&entry.hidden)continue;
+                        if(scopePrefix!=null&&!entry.parent.equals(scope)&&!entry.parent.startsWith(scopePrefix))continue;
+                        if(!matchesType(entry,kind,types))continue;
+                        if(fuzzy){
+                            if(!FileSubtypes.matches(entry,extension))continue;
+                            if(inspected++==MAX_TYPO_CANDIDATES)break;
+                            if(!matcher.matchesTypo(entry))continue;
+                        }else if(!matcher.matches(entry))continue;
+                        if(subtypes&&!entry.directory){String ext=FileSubtypes.extension(entry);
+                            extensionCounts.put(ext,extensionCounts.getOrDefault(ext,0)+1);}
+                        if(!fuzzy&&!FileSubtypes.matches(entry,extension))continue;
+                        mapped.add(entry);
+                        mappedCount++;
+                        if(fuzzy&&mappedCount==MAX_TYPO_RESULTS)break;
+                    }
+                    if(fuzzy&&mappedCount>0)usedTypoFallback=true;
+                }
+                tiles=mapped.tiles(cancellation::throwIfCanceled);analysis=mapped.analysis();unreadable=0;
+                matchesInOrder=new ArrayList<>(tiles.size());
+                for(StorageMapData.Tile tile:tiles)matchesInOrder.add(tile.entry);
+                count=matchesInOrder.size();
+            }else if(folderMap){
                 StorageMapData data=new StorageMapData(scope,includeHidden);
                 if(previousRows.isEmpty()&&!entries.isEmpty()){
                     StorageMapData saved=new StorageMapData(scope,includeHidden);
@@ -917,20 +1904,42 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
                         saved.add(entries.get(i));
                     }
                     List<StorageMapData.Tile> initial=saved.tiles();
-                    if(!initial.isEmpty())ui.post(()->showIndexedMap(ticket,scope,initial));
+                    if(!initial.isEmpty()){
+                        StorageMapData.Analysis provisional=saved.analysis(true);
+                        ui.post(()->showIndexedMap(ticket,scope,initial,provisional));
+                    }
                 }
-                unreadable=index.scanMap(scope,includeHidden,cancellation,data);tiles=data.tiles();
+                unreadable=index.scanMap(scope,includeHidden,cancellation,data,liveIdentity);
+                if(index.isRootEnabled())for(int i=0;i<entries.size();i++){
+                    if((i&4095)==0)cancellation.throwIfCanceled();
+                    data.addIndexedFile(entries.get(i));
+                }
+                tiles=data.tiles();analysis=data.analysis(false);
                 for(StorageMapData.Tile tile:tiles)matchesInOrder.add(tile.entry);
                 count=matchesInOrder.size();
-            }else{tiles=Collections.emptyList();unreadable=0;}
+            }else{tiles=Collections.emptyList();analysis=null;unreadable=0;}
             if(kind<9&&!reuse&&!reuseRoot&&!map){SearchQuery matcher=SearchQuery.compile(input,opts);Comparator<FileEntry> cmp=comparator(field,reverse);
                 String scopePrefix=scope==null?null:scope.endsWith("/")?scope:scope+"/";
-                for(int i=0;i<candidates.size();i++){if((i&511)==0&&(Thread.currentThread().isInterrupted()||sequence.get()!=ticket))return;
-                    FileEntry e=candidates.get(i);if(!includeHidden&&e.hidden)continue;
-                    if(!manager&&scopePrefix!=null&&!e.parent.equals(scope)&&!e.parent.startsWith(scopePrefix))continue;
-                    if(!rootOverview&&(!matchesType(e,kind,types)||!matcher.matches(e)))continue;
-                    if(subtypes&&!e.directory){String ext=FileSubtypes.extension(e);extensionCounts.put(ext,extensionCounts.getOrDefault(ext,0)+1);}
-                    if(!FileSubtypes.matches(e,extension))continue;count++;matchesInOrder.add(e);}
+                int passes=!manager&&matcher.hasTypoFallback()?2:1;
+                for(int pass=0;pass<passes&&matchesInOrder.isEmpty();pass++){
+                    boolean fuzzy=pass!=0;
+                    int inspected=0;
+                    for(int i=0;i<candidates.size();i++){if((i&511)==0&&(Thread.currentThread().isInterrupted()||sequence.get()!=ticket))return;
+                        FileEntry e=candidates.get(i);if(!includeHidden&&e.hidden)continue;
+                        if(!manager&&scopePrefix!=null&&!e.parent.equals(scope)&&!e.parent.startsWith(scopePrefix))continue;
+                        if(!rootOverview&&!matchesType(e,kind,types))continue;
+                        if(fuzzy){
+                            if(!FileSubtypes.matches(e,extension))continue;
+                            if(inspected++==MAX_TYPO_CANDIDATES)break;
+                            if(!matcher.matchesTypo(e))continue;
+                        }else if(!rootOverview&&!matcher.matches(e))continue;
+                        if(subtypes&&!e.directory){String ext=FileSubtypes.extension(e);extensionCounts.put(ext,extensionCounts.getOrDefault(ext,0)+1);}
+                        if(!fuzzy&&!FileSubtypes.matches(e,extension))continue;
+                        count++;matchesInOrder.add(e);
+                        if(fuzzy&&matchesInOrder.size()==MAX_TYPO_RESULTS)break;
+                    }
+                    if(fuzzy&&!matchesInOrder.isEmpty())usedTypoFallback=true;
+                }
                 if(manager)matchesInOrder.sort(Comparator.comparing((FileEntry entry)->!entry.directory).thenComparing(cmp));
                 else if(field!=0){
                     Comparator<FileEntry> cancellable=(left,right)->{
@@ -957,6 +1966,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             else if(kind>=9||combined){fetched=deviceSearch.page(input,kind>=9?kind-8:DeviceSearch.ALL,null,cancellation);devices=fetched.results;}
             final List<FileSubtypes.Choice> subtypeChoices=FileSubtypes.sorted(extensionCounts);
             boolean sameRows=refreshViewport&&!map&&sameResults(previousRows,found);
+            final boolean similarNames=usedTypoFallback;
             final long matches=count,elapsed=(System.nanoTime()-begin)/1000000;final List<DeviceSearch.Result> deviceResults=devices;final DeviceSearch.Page firstPage=fetched;
             ui.post(()->{if(sequence.get()!=ticket||isDestroyed())return;searchRunning=false;
                 Bundle restore=browseRestore;
@@ -973,12 +1983,12 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
                     mapSizes.clear();
                     mapTotalBytes=0;
                     if(map){
-                        showMapTiles(scope,tiles);
+                        showMapTiles(scope,tiles,analysis);
                     }
                 }
                 availableSubtypes=subtypeChoices;
                 if(firstPage!=null){devicePages.add(firstPage);deviceNext=firstPage.next;if(deviceNext!=null){deviceStarts.add(deviceNext);deviceOffsets.add((long)firstPage.results.size());}}
-                totalFileMatches=matches;lastSearchMillis=elapsed;
+                totalFileMatches=map?adapter.items.size():matches;lastSearchMillis=elapsed;typoResults=similarNames;
                 if(changed){adapter.notifyDataSetChanged();
                     if(restore!=null){if(state.loaded||manager||map){restoreBrowsePosition(restore);browseRestore=null;}}
                     else results.setSelection(0);
@@ -989,45 +1999,54 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
                     List<String> recent=stored("folderRecents");
                     if(recent.isEmpty()||!scope.equals(recent.get(0)))addQuery("folderRecents",scope);
                 }
-                if(map)status.setText(size(tiles.stream().mapToLong(tile->tile.bytes).sum())+" • "+format(matches)+" items");
-                else if(manager||!state.scanning)status.setText(resultCount(matches+deviceResults.size(),deviceNext!=null));
-                updateSelection();updateEmpty();
-                if (fileSearch && state.loaded && state.entries == entries && state.error.isEmpty()) {
+                if(map){
+                    updateMapStatus();
+                }else if(manager||!state.scanning){
+                    status.setText(resultCount(matches+deviceResults.size(),deviceNext!=null)+(similarNames?" · Similar file names":""));
+                }
+                updateSelection();updateEmpty();displayFolderOverview();
+                if (fileSearch && !similarNames && state.loaded && state.entries == entries && state.error.isEmpty()) {
                     List<FileEntry> page = new ArrayList<>(found.subList(0, Math.min(found.size(), SavedSearchRows.MAX_ROWS)));
                     saveSearchRows = () -> SavedSearchRows.write(prefs, searchKey, page);
                     ui.postDelayed(saveSearchRows, 500);
                 }
                 if(!reportedFullyDrawn&&(state.loaded||kind>=9)){reportedFullyDrawn=true;reportFullyDrawn();}
-                if(!manager&&!map&&kind<9&&state.entries!=entries)runSearch(true);});
+                if(kind<9&&state.entries!=entries&&!applyingLiveRootDelta())runSearch(true,liveIdentity);});
         }catch(android.os.OperationCanceledException|java.util.concurrent.CancellationException ignored){}catch(Exception failure){ui.post(()->{if(sequence.get()!=ticket||isDestroyed())return;searchRunning=false;
             if(!refreshViewport){clearResultRows();adapter.notifyDataSetChanged();}
-            showError(failure.getMessage());status.setText(manager||map?"Folder unavailable":"Search unavailable");updateEmpty();});}});
+            showError(failure.getMessage());status.setText(manager||folderMap?"Folder unavailable":"Search unavailable");updateEmpty();});}});
         }catch(RejectedExecutionException busy){searchRunning=false;}}
     private void clearResultRows(){
         provisionalSearchKey = null;
         adapter.items=Collections.emptyList();adapter.devices=Collections.emptyList();
-        adapter.sections=FileSections.EMPTY;totalFileMatches=0;
+        adapter.sections=FileSections.EMPTY;totalFileMatches=0;typoResults=false;
         mapView.clear();
         mapRowsScope=null;
-        mapTiles=Collections.emptyList();
+        mapTiles=Collections.emptyList();orderedMapTiles=Collections.emptyList();
+        mapFilterRevision++;if(pendingMapFilter!=null)pendingMapFilter.cancel(true);
         if(pendingMapOrder!=null)pendingMapOrder.cancel(true);
-        mapSizes.clear();mapTotalBytes=0;
+        mapSizes.clear();mapTotalBytes=0;mapFolderCount=0;
+        mapAnalysis=new StorageMapData.Analysis(new StorageMapData.Scale(0,0),null,false);
     }
-    private void showIndexedMap(int ticket,String scope,List<StorageMapData.Tile> tiles){
+    private void showIndexedMap(int ticket,String scope,List<StorageMapData.Tile> tiles,StorageMapData.Analysis analysis){
         if(sequence.get()!=ticket||isDestroyed()||!adapter.items.isEmpty())return;
         List<FileEntry> rows=new ArrayList<>(tiles.size());
         for(StorageMapData.Tile tile:tiles)rows.add(tile.entry);
         adapter.items=rows;adapter.sections=FileSections.EMPTY;totalFileMatches=rows.size();
-        showMapTiles(scope,tiles);adapter.notifyDataSetChanged();
+        showMapTiles(scope,tiles,analysis);adapter.notifyDataSetChanged();
         status.setText(size(mapTotalBytes)+" • Checking storage…");
         updateSelection();updateEmpty();
     }
-    private void showMapTiles(String scope,List<StorageMapData.Tile> tiles){
+    private void showMapTiles(String scope,List<StorageMapData.Tile> tiles,StorageMapData.Analysis analysis){
         mapRowsScope=scope;
+        mapAnalysis=analysis;
         mapTiles=tiles;
-        mapSizes.clear();mapTotalBytes=0;
-        for(StorageMapData.Tile tile:tiles){mapSizes.put(tile.entry.path(),tile.bytes);mapTotalBytes+=tile.bytes;}
-        displayMapOrder(scope,tiles);
+        mapSizes.clear();mapTotalBytes=0;mapFolderCount=0;
+        for(StorageMapData.Tile tile:tiles){
+            mapSizes.put(tile.entry.path(),tile.bytes);mapTotalBytes=StorageMapData.sum(mapTotalBytes,Math.max(0,tile.bytes));
+            if(tile.entry.directory)mapFolderCount++;
+        }
+        applyMapOrder(tiles,false);
         if(mapSort!=2||!mapDescending)orderMap(false);
     }
     private void orderMap(boolean fromTop){
@@ -1052,16 +2071,43 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         if(source.size()<4096)sortTiles.run();else pendingMapOrder=mapOrders.submit(sortTiles);
     }
     private void applyMapOrder(List<StorageMapData.Tile> ordered,boolean fromTop){
-        List<FileEntry> rows=new ArrayList<>(ordered.size());
-        for(StorageMapData.Tile tile:ordered)rows.add(tile.entry);
-        adapter.items=rows;
-        displayMapOrder(mapRowsScope,ordered);
-        adapter.notifyDataSetChanged();
-        if(fromTop){mapView.setSelectionFromTop(0,0);results.setSelection(0);}
+        orderedMapTiles=ordered;
+        final int revision=++mapFilterRevision;
+        if(pendingMapFilter!=null)pendingMapFilter.cancel(true);
+        mapFilter.purge();
+        String term=mapSearchResults?"":query.getText().toString().trim(); SearchQuery.Options criteria=options();
+        Runnable filter=()->{
+            SearchQuery matcher=term.isEmpty()?null:SearchQuery.compile(term,criteria);
+            List<StorageMapData.Tile> visible=matcher==null?ordered:new ArrayList<>();
+            List<FileEntry> rows=new ArrayList<>(matcher==null?ordered.size():Math.min(ordered.size(),256));
+            for(StorageMapData.Tile tile:ordered){
+                if(Thread.currentThread().isInterrupted())return;
+                if(matcher==null||matcher.matches(tile.entry)){rows.add(tile.entry);if(matcher!=null)visible.add(tile);}
+            }
+            Runnable render=()->{
+                if(!storageMap||isDestroyed()||revision!=mapFilterRevision)return;
+                retainSelection(rows);adapter.items=rows;totalFileMatches=rows.size();
+                displayMapOrder(mapRowsScope,visible);adapter.notifyDataSetChanged();
+                if(fromTop){mapView.setSelectionFromTop(0,0);results.setSelection(0);}
+                updateMapStatus();displayFolderOverview();updateSelection();updateEmpty();
+            };
+            if(Looper.myLooper()==Looper.getMainLooper())render.run();else ui.post(render);
+        };
+        if(ordered.size()<=1024)filter.run();else if(!mapFilter.isShutdown())pendingMapFilter=mapFilter.submit(filter);
+    }
+    private void updateMapStatus(){
+        int shown=adapter.items.size(),total=mapTiles.size();
+        if(mapSearchResults){status.setText(format(shown)+(shown==1?" indexed match":" indexed matches")+(typoResults?" · Similar file names":""));return;}
+        status.setText(shown==total?format(total)+" items":format(shown)+" of "+format(total)+" items");
     }
     private void displayMapOrder(String scope,List<StorageMapData.Tile> tiles){
-        mapView.show(scope,tiles,e->{if(selectionMode)toggle(e,mapView);else open(e);},
-                e->{longPressConsumed=false;beginSelection(e,mapView);},
+        mapView.show(scope,tiles,mapAnalysis.scale,e->{if(selectionMode)toggle(e,mapView);else open(e);},
+                (children,e)->{
+                    if(selectionMode)return false;
+                    prepareFilePreview(e,children);
+                    return true;
+                },
+                (anchor,e)->{longPressConsumed=false;boolean inspect=selectionMode;handleFileHold(e,anchor);return inspect;},
                 e->{mapPreview=e;updateMapDetails();});
     }
     private static boolean sameResults(List<FileEntry> previous,List<FileEntry> next){
@@ -1102,21 +2148,26 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
                 ArrayList<DeviceSearch.Result> rows=new ArrayList<>();for(DeviceSearch.Page part:devicePages)rows.addAll(part.results);
                 adapter.devices=rows;adapter.notifyDataSetChanged();
                 if(results instanceof ListView)((ListView)results).setSelectionFromTop(Math.max(0,first+shift),top);else results.setSelection(Math.max(0,first+shift));
-                searchRunning=false;long offset=deviceOffsets.get(firstDevicePage);status.setText(resultCount(totalFileMatches+offset+rows.size(),deviceNext!=null));
+                searchRunning=false;long offset=deviceOffsets.get(firstDevicePage);status.setText(resultCount(totalFileMatches+offset+rows.size(),deviceNext!=null)+(typoResults?" · Similar file names":""));
                 ui.post(()->{restoringDeviceScroll=false;});updateEmpty();});
             }catch(android.os.OperationCanceledException ignored){}catch(Exception failure){ui.post(()->{if(isDestroyed()||sequence.get()!=ticket)return;searchRunning=false;showError(failure.getMessage());});}});
         }catch(RejectedExecutionException busy){searchRunning=false;}
     }
     private void updateEmpty(){if(empty==null)return;updateSection(results.getFirstVisiblePosition());boolean noResults=adapter.getCount()==0;int categoryPosition=category.getSelectedItemPosition();
         boolean waiting=(isFileManager()&&!storageMap&&searchRunning&&!refreshResults)
-                ||(noResults&&(searchRunning||(categoryPosition<9&&!storageMap&&(!state.loaded||state.scanning))));
+                ||(noResults&&(searchRunning||(categoryPosition<9&&(!storageMap||mapSearchResults)&&(!state.loaded||state.scanning))));
         boolean hideFolderContent=isFolderView()&&(waiting||noResults);
         results.setVisibility(storageMap&&!mapList?View.GONE:hideFolderContent?View.INVISIBLE:View.VISIBLE);
         mapView.setVisibility(!storageMap||mapList?View.GONE:hideFolderContent?View.INVISIBLE:View.VISIBLE);
         boolean coldLoading=noResults&&(!state.loaded||state.lastScanMillis==0&&state.scanning);
         skeleton.setStyle(coldLoading?LoadingSkeleton.BRAND:activeLayout==3?LoadingSkeleton.GRID:LoadingSkeleton.LIST);
         skeleton.setVisibility(waiting?View.VISIBLE:View.GONE);empty.setVisibility(noResults&&!waiting?View.VISIBLE:View.GONE);emptyAction.setVisibility(View.GONE);if(!noResults)return;
-        int c=category.getSelectedItemPosition();if(isFolderView())emptyText.setText(query.length()==0||storageMap?"Folder is empty":"No matches in this folder");
+        int c=category.getSelectedItemPosition();if(isFolderView()&&!mapSearchResults){
+            if(probeIndex!=index&&!index.isRootEnabled()&&!FileIndex.hasAccess(this)){
+                emptyText.setText(storageMap?"Allow access to map storage":"Allow access to browse files");
+                emptyAction.setText("Allow file access");emptyAction.setVisibility(View.VISIBLE);
+            }else emptyText.setText(query.length()==0?"Folder is empty":"No matches in this folder");
+        }
         else if(c==10&&!DeviceSearch.hasContacts(this)){emptyText.setText("Search contacts by name or number");emptyAction.setText("Allow Contacts");emptyAction.setVisibility(View.VISIBLE);}
         else if(c==11&&!DeviceSearch.hasSms(this)){emptyText.setText("Search SMS by sender or message");emptyAction.setText("Allow SMS");emptyAction.setVisibility(View.VISIBLE);}
         else if(c>=9)emptyText.setText(searchRunning?"Searching":"No results");
@@ -1148,8 +2199,43 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         if(results instanceof ListView)((ListView)results).setSelectionFromTop(position,top);
         else results.setSelection(position);haptic(results);
     }
+    private boolean handleDrawerGesture(MotionEvent event){
+        if(locationsButton==null||storageDrawer!=null||selectionMode||spotlightTour!=null)return false;
+        View decor=getWindow().getDecorView();
+        boolean rtl=decor.getLayoutDirection()==View.LAYOUT_DIRECTION_RTL;
+        switch(event.getActionMasked()){
+            case MotionEvent.ACTION_DOWN:
+                drawerStartX=event.getX();drawerStartY=event.getY();
+                float edge=rtl?decor.getWidth()-drawerStartX:drawerStartX;
+                int system=0;
+                if(Build.VERSION.SDK_INT>=29&&decor.getRootWindowInsets()!=null){
+                    android.graphics.Insets insets=decor.getRootWindowInsets().getSystemGestureInsets();
+                    system=rtl?insets.right:insets.left;
+                }
+                drawerSwipe=edge>=system&&edge<=system+dp(18);
+                return false;
+            case MotionEvent.ACTION_MOVE:
+                if(!drawerSwipe)return false;
+                float dx=(event.getX()-drawerStartX)*(rtl?-1:1),dy=Math.abs(event.getY()-drawerStartY);
+                if(dx< -dp(12)||dy>Math.max(dp(28),dx))drawerSwipe=false;
+                if(drawerSwipe&&dx>=dp(60)&&dx>dy*1.5f){
+                    drawerSwipe=false;
+                    MotionEvent cancel=MotionEvent.obtain(event);cancel.setAction(MotionEvent.ACTION_CANCEL);
+                    try{super.dispatchTouchEvent(cancel);}finally{cancel.recycle();}
+                    showLocations(locationsButton);return true;
+                }
+                return false;
+            case MotionEvent.ACTION_UP:case MotionEvent.ACTION_CANCEL:case MotionEvent.ACTION_POINTER_DOWN:
+                drawerSwipe=false;return false;
+            default:return false;
+        }
+    }
     @Override public boolean dispatchTouchEvent(MotionEvent event){
         int action=event.getActionMasked();
+        if(itemActions!=null&&itemActions.dispatch(event,super::dispatchTouchEvent)){
+            pullRefreshArmed=pinchArmed=pinchingResults=drawerSwipe=false;return true;
+        }
+        if(handleDrawerGesture(event))return true;
         if(action==MotionEvent.ACTION_DOWN){
             View content=empty!=null&&empty.getVisibility()==View.VISIBLE?empty:storageMap&&!mapList?mapView:results;
             android.graphics.Rect bounds=new android.graphics.Rect();
@@ -1177,14 +2263,15 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
                 // A pull is a check for changes. The toolbar retains explicit index controls.
                 haptic(refresh);
                 int kind=category.getSelectedItemPosition();
-                if(isDeviceCategory(kind)){deviceSearch.invalidateApps();runSearch(true);}
-                else if(isFolderView()){
+                if(isDeviceCategory(kind)){refreshPulse.showPulse();deviceSearch.invalidateApps();runSearch(true);}
+                else if(isFolderView()&&!mapSearchResults){
+                    refreshPulse.showPulse();
                     runSearch(true);
                     index.discoverOnOpen(storageMap?mapScope():folderScope);
-                    toast(getString(R.string.app_name)+" · Checking folder");
                 }else if(state.lastScanMillis>0){
+                    refreshPulse.showPulse();
                     index.discoverOnOpen(folderScope);
-                    if(index.checkChangesNow())toast(getString(R.string.app_name)+" · Checking for changes");
+                    index.checkChangesNow();
                 }else if(!state.scanning){
                     status.setText("Build the index to search this storage");
                 }
@@ -1204,10 +2291,84 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         return super.dispatchTouchEvent(event);
     }
 
+    private void handleFileHold(FileEntry entry, View anchor) {
+        if(selectionMode&&isSelected(entry)){
+            longPressConsumed=true;
+            haptic(anchor);
+            selectionMenu(anchor);
+            return;
+        }
+        if(selectionMode){beginSelection(entry,anchor);return;}
+        longPressConsumed=true;
+        if(navigationMenu!=null)navigationMenu.dismiss();
+        View source=anchor.getParent() instanceof LinearLayout&&((LinearLayout)anchor.getParent()).getTag() instanceof Holder
+                ?(View)anchor.getParent():anchor;
+        itemActions.begin(fileTarget(source,entry));
+    }
+    private FileHoldActions.Target fileTargetAt(float x,float y){
+        if(storageMap&&!mapList)return mapView.fileTargetAt(x,y,this::fileTarget);
+        if(results==null)return null;
+        int position=FileHoldActions.position(results,x,y,itemScreen,itemVisible);
+        if(position==AbsListView.INVALID_POSITION)return null;
+        FileEntry entry=adapter.fileAt(position);
+        View row=results.getChildAt(position-results.getFirstVisiblePosition());
+        return row!=null&&entry!=null?fileTarget(row,entry):null;
+    }
+    private FileHoldActions.Target fileTarget(View anchor,FileEntry entry){
+        FileHoldActions.Target target=new FileHoldActions.Target(anchor,entry,false,true,action->{
+            switch(action){
+                case "Open":open(entry);break;
+                case "Share":prepareFileAction(entry,true,false);break;
+                case "Open with":prepareFileAction(entry,false,true);break;
+                case "Copy":case "Move":saveItemClipboard(entry,"Move".equals(action));break;
+                case "Properties":properties(entry);break;
+                case "Copy path":copyPath(entry.path());break;
+                case "Select items":longPressConsumed=false;beginSelection(entry,anchor);break;
+                case "Rename":if(provisionalSearchKey==null)
+                    activeSheet=FileRename.show(this,Collections.singletonList(entry),index.isRootEnabled(),fileActions,()->{});
+                    else toast("Wait for the index before renaming");break;
+                case "Delete":if(provisionalSearchKey==null)
+                    activeSheet=FileDeletion.confirm(this,Collections.singletonList(entry),index.isRootEnabled(),fileActions,()->{});
+                    else toast("Wait for the index before deleting");break;
+            }
+        });
+        if(storageMap&&!mapList){
+            List<StorageMapData.Tile> shown=mapView.previewTiles();
+            target.withPreviewOrder(shown.size(),i->shown.get(i).entry,e->fileTarget(anchor,e));
+        }else{
+            List<FileEntry> shown=adapter.items;
+            target.withPreviewOrder(shown.size(),shown::get,e->fileTarget(anchor,e));
+        }
+        String destination=entry.parent;
+        if(!entry.directory&&destination!=null&&destination.startsWith("/")&&!"/".equals(destination)
+                &&pasteButton!=null&&pasteButton.getVisibility()==View.VISIBLE){
+            target.withQuickPaste(destination,()->{
+                if(isFinishing()||isDestroyed())return;
+                activeSheet=QuickPasteConfirmation.show(this,destination,index::isRootEnabled,
+                        ()->haptic(results),this::showError);
+            });
+        }
+        return target;
+    }
+    private void saveItemClipboard(FileEntry entry, boolean move) {
+        if(provisionalSearchKey!=null){toast("Wait for the index before copying or moving files");return;}
+        boolean root=index.isRootEnabled();
+        submitFileAction(()->{
+            FileClipboard.save(getApplicationContext(),Collections.singletonList(entry),move,root);
+            ui.post(()->{if(isDestroyed())return;updateClipboard();
+                toast(move?"Choose a destination to move":"Choose a destination to paste");});
+        });
+    }
     private void beginSelection(FileEntry entry,View source){if(longPressConsumed)return;
         if(provisionalSearchKey!=null){toast("Wait for the index before selecting files");return;}
         longPressConsumed=true;enterSelection();
         if(!isSelected(entry)){if(allSelected)selection.remove(entry.path());else selection.add(entry.path());}selected=entry;haptic(source);updateSelection();adapter.notifyDataSetChanged();}
+    private void startGridSelection(View source){
+        if(selectionMode||!gridCanSelect())return;
+        longPressConsumed=false;
+        enterSelection();haptic(source);updateSelection();adapter.notifyDataSetChanged();
+        results.announceForAccessibility("Tap files to select them");
+    }
     private void enterSelection(){selectionMode=true;query.dismissDropDown();query.clearFocus();
         getSystemService(android.view.inputmethod.InputMethodManager.class).hideSoftInputFromWindow(query.getWindowToken(),0);
         if(results.isShown())results.requestFocus();}
@@ -1215,6 +2376,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
     private void toggle(FileEntry entry,View source){enterSelection();if(!selection.remove(entry.path()))selection.add(entry.path());selected=entry;haptic(source);updateSelection();adapter.notifyDataSetChanged();}
     private void clearSelection(){selectionMode=false;allSelected=false;longPressConsumed=false;selection.clear();if(selectionBar!=null){updateSelection();adapter.notifyDataSetChanged();}}
     private void updateSelection(){if(selectionBar==null)return;selectionBar.setVisibility(selectionMode?View.VISIBLE:View.GONE);controls.setVisibility(selectionMode?View.GONE:View.VISIBLE);selectionCount.setText(format(selectionSize())+" selected");
+        if(results!=null)updateSection(results.getFirstVisiblePosition());
         if(mapSelection==null)return;
         if(storageMap){
             mapView.updateSelection(this::isSelected);
@@ -1232,20 +2394,67 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         boolean show=storageMap&&!mapList&&selectionMode&&bytes!=null;
         mapDetails.setVisibility(show?View.VISIBLE:View.GONE);
         if(show){
-            String share=mapTotalBytes>0?"  •  "+String.format(Locale.getDefault(),"%.1f%% of folder",bytes*100.0/mapTotalBytes):"";
+            String share=bytes>=0&&mapTotalBytes>0?"  •  "+String.format(Locale.getDefault(),mapSearchResults?"%.1f%% of results":"%.1f%% of folder",bytes*100.0/mapTotalBytes):"";
             SpannableStringBuilder details=new SpannableStringBuilder(entry.name).append('\n').append(entry.path())
-                    .append('\n').append(StorageMapView.typeLabel(entry)).append("  •  ").append(size(bytes)).append(share);
+                    .append('\n').append(StorageMapView.typeLabel(entry)).append("  •  ")
+                    .append(bytes<0?"Unknown size":size(bytes)).append(share);
             details.setSpan(new StyleSpan(Typeface.BOLD),0,entry.name.length(),0);
             if(!TextUtils.equals(mapSelection.getText(),details)){mapSelection.setText(details);mapDetails.scrollTo(0,0);}
         }
         updateStatusOverlay(prefs.getBoolean("showStatus",true));
     }
     private void selectAll(){if(totalFileMatches==0){toast("No files to select");return;}enterSelection();allSelected=true;selection.clear();haptic(results);updateSelection();adapter.notifyDataSetChanged();}
-    private void selectionMenu(View anchor){PopupMenu p=theme.popup(this,anchor);for(String s:new String[]{"Select all","Invert selection","Clear selection","Share","Rename","Copy path","Properties"})p.getMenu().add(s);
-        if(storageMap&&selected!=null&&selectionSize()==1)p.getMenu().add("Open");
-        showMenu(anchor,p.getMenu(),"Selection",value->{switch(value){case "Select all":selectAll();break;case "Invert selection":allSelected=!allSelected;updateSelection();adapter.notifyDataSetChanged();break;
-            case "Clear selection":clearSelection();break;case "Share":shareSelection();break;case "Rename":renameSelection();break;case "Copy path":if(selected!=null)copyPath(selected.path());break;case "Properties":if(selected!=null)properties(selected);break;
-            case "Open":if(selected!=null)open(selected);break;}});}
+    private void selectionMenu(View anchor){
+        long count=selectionSize();
+        boolean ready=count>0&&count<=FileClipboard.MAX_ITEMS&&provisionalSearchKey==null
+                &&!FileOperationService.getState().running;
+        Menu model=theme.popup(this,anchor).getMenu();
+        model.add("Share").setIcon(R.drawable.ic_share).setEnabled(ready);
+        model.add("Copy").setIcon(R.drawable.ic_copy).setEnabled(ready);
+        model.add("Move").setIcon(R.drawable.ic_cut).setEnabled(ready);
+        model.add("Rename").setIcon(R.drawable.ic_rename).setEnabled(ready);
+        model.add("Delete selected").setIcon(R.drawable.ic_delete).setEnabled(ready);
+        if(count==2)model.add("Compare files").setIcon(R.drawable.ic_list).setEnabled(ready);
+        if(count==1&&selected!=null&&isSelected(selected)){
+            model.add("Copy path").setIcon(R.drawable.ic_copy);
+            model.add("Properties").setIcon(R.drawable.ic_document);
+            if(storageMap)model.add("Open").setIcon(R.drawable.ic_file);
+        }
+        model.add("Select all").setIcon(R.drawable.ic_select);
+        model.add("Invert selection").setIcon(R.drawable.ic_select);
+        model.add("Clear selection").setIcon(R.drawable.ic_close);
+        showMenu(anchor,model,count==1?"1 item selected":format(count)+" items selected",2,value->{
+            switch(value){
+                case "Select all":selectAll();break;
+                case "Invert selection":allSelected=!allSelected;updateSelection();adapter.notifyDataSetChanged();break;
+                case "Clear selection":clearSelection();break;
+                case "Share":shareSelection();break;
+                case "Copy":saveClipboard(false);break;
+                case "Move":saveClipboard(true);break;
+                case "Rename":renameSelection();break;
+                case "Compare files":compareSelection();break;
+                case "Delete selected":deleteSelection();break;
+                case "Copy path":if(selected!=null&&selectionSize()==1&&isSelected(selected))copyPath(selected.path());break;
+                case "Properties":if(selected!=null&&selectionSize()==1&&isSelected(selected))properties(selected);break;
+                case "Open":if(selected!=null&&selectionSize()==1&&isSelected(selected))open(selected);break;
+            }
+        });
+    }
+    private void compareSelection(){
+        if(selectionSize()!=2||provisionalSearchKey!=null||FileOperationService.getState().running){
+            toast("Select two files from the current results.");return;
+        }
+        ArrayList<FileEntry> pair=actionSelection();
+        if(pair==null||pair.size()!=2||pair.get(0).directory||pair.get(1).directory){
+            toast("Choose two files, not folders.");return;
+        }
+        FileEntry before=pair.get(0),after=pair.get(1);
+        FileComparison.Mode mode=FileComparison.mode(before.name,after.name);
+        if(mode==null){toast("Choose two APKs, two DEX files, or two text files.");return;}
+        if(activeSheet!=null)activeSheet.dismiss();
+        activeSheet=FileCompareSheet.open(this,before,after,index.isRootEnabled(),mode,
+                closed->{if(activeSheet==closed)activeSheet=null;});
+    }
     private void saveClipboard(boolean move){if(selectionSize()==0){toast("Select files");return;}if(selectionSize()>512){toast("Choose up to 512 items at once");return;}
         List<FileEntry> entries=adapter.items;Set<String> marked=new HashSet<>(selection);boolean invert=allSelected,root=index.isRootEnabled();
         submitFileAction(()->{ArrayList<FileEntry> chosen=new ArrayList<>();
@@ -1256,7 +2465,11 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         if(selectionSize()==0){toast("Select files");return null;}if(selectionSize()>FileClipboard.MAX_ITEMS){toast("Choose up to 512 items at once");return null;}
         ArrayList<FileEntry> chosen=new ArrayList<>();for(FileEntry entry:adapter.items)if(isSelected(entry))chosen.add(entry);return chosen;
     }
-    private void deleteSelection(){ArrayList<FileEntry> chosen=actionSelection();if(chosen!=null)activeSheet=FileDeletion.confirm(this,chosen,index.isRootEnabled(),fileActions,this::clearSelection);}
+    private void deleteSelection(){
+        if(provisionalSearchKey!=null){toast("Wait for current results before deleting.");return;}
+        if(FileOperationService.getState().running){toast("A file operation is already running.");return;}
+        ArrayList<FileEntry> chosen=actionSelection();boolean root=index.isRootEnabled();
+        if(chosen!=null)activeSheet=FileDeletion.confirm(this,chosen,root,fileActions,this::clearSelection,()->!root||index.isRootEnabled());}
     private void renameSelection(){ArrayList<FileEntry> chosen=actionSelection();if(chosen!=null)activeSheet=FileRename.show(this,chosen,index.isRootEnabled(),fileActions,this::clearSelection);}
     private void paste(){FileClipboard.Snapshot clipboard=FileClipboard.read(this);
         if(clipboard==null){updateClipboard();toast("Clipboard is empty");return;}
@@ -1278,7 +2491,7 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         EditText destination=new EditText(this);
         destination.setSingleLine();destination.setTextSize(14);
         destination.setContentDescription("Destination folder");
-        String initial=storageMap?mapScope():folderScope!=null?folderScope:Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath();
+        String initial=storageMap&&!mapSearchResults?mapScope():folderScope!=null?folderScope:Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).getAbsolutePath();
         destination.setText(initial);
         navigation.addView(destination,new LinearLayout.LayoutParams(0,dp(48),1));
         ImageButton browse=icon(R.drawable.ic_folder,"Browse destination");
@@ -1291,8 +2504,9 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         browse.setOnClickListener(v->{
             if(pathDialog!=null)return;
             String value=destination.getText().toString().trim();
-            pathDialog=new FolderPathDialog(this,index,value.isEmpty()?initial:value,this::normalizeFolderPath,
-                    destination::setText,()->pathDialog=null);
+            pathDialog=new FolderPathDialog(this,index,"Choose destination",value.isEmpty()?initial:value,this::normalizeFolderPath,
+                    destination::setText,()->pathDialog=null,FolderPathDialog.defaultRoots(index,this::normalizeFolderPath),
+                    folder->!"/".equals(folder),showHidden,true);
             pathDialog.show();
         });
         sheet.action("Clear clipboard",false,false,()->{FileClipboard.clear(this);updateClipboard();});
@@ -1309,7 +2523,10 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         else if(isFolderView()&&!searchRunning)updateFiles();}}
     private interface FileAction {void run()throws Exception;}
     private void submitFileAction(FileAction action){try{fileActions.execute(()->{try{action.run();}catch(Exception failure){ui.post(()->{if(!isDestroyed())showError(failure.getMessage());});}});}catch(RejectedExecutionException busy){toast("File access is busy");}}
-    private void open(FileEntry e){if(e.directory){navigateFolder(e.path());return;}prepareFileAction(e,false,false);}
+    private void open(FileEntry e){
+        if(revealedPreviewPath!=null){revealedPreviewPath=null;adapter.notifyDataSetChanged();}
+        if(e.directory){navigateFolder(e.path());return;}prepareFileAction(e,false,false);
+    }
     private void shareSelection(){
         List<FileEntry> files=actionSelection();
         if(files==null||files.isEmpty())return;
@@ -1332,22 +2549,29 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             ui.post(()->{if(!isDestroyed())try{startActivity(Intent.createChooser(share,"Share"));}catch(Exception failure){toast("No compatible app");}});
         });
     }
-    private void prepareFileAction(FileEntry e,boolean share,boolean external){boolean root=index.isRootEnabled();
-        if(!share&&!external){if(openingPreview)return;openingPreview=true;List<FileEntry> ordered=adapter.items;
-            try{fileActions.execute(()->{PreviewSession session=PreviewSession.create(ordered,e.path(),root);ui.post(()->{openingPreview=false;
+    private void prepareFilePreview(FileEntry e,List<FileEntry> ordered){
+        boolean root=index.isRootEnabled();
+        if(openingPreview)return;
+        openingPreview=true;
+        try{fileActions.execute(()->{PreviewSession session=PreviewSession.create(ordered,e.path(),root);ui.post(()->{openingPreview=false;
                 if(isDestroyed()){PreviewSession.release(session.id);return;}
                 startActivityForResult(FileViewerActivity.intent(this,null,e.name,e.path(),e.size).putExtra(PreviewSession.EXTRA,session.id),21);});});}
-            catch(RejectedExecutionException busy){openingPreview=false;toast("File access is busy");}return;}
+        catch(RejectedExecutionException busy){openingPreview=false;toast("File access is busy");}
+    }
+    private void prepareFileAction(FileEntry e,boolean share,boolean external){boolean root=index.isRootEnabled();
+        if(!share&&!external){prepareFilePreview(e,adapter.items);return;}
         submitFileAction(()->{Uri uri=RootFileProvider.issue(getApplicationContext(),e,root);ui.post(()->{
         if(isDestroyed())return;
-        String mime=getContentResolver().getType(uri);Intent intent=share?new Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM,uri):new Intent(Intent.ACTION_VIEW).setDataAndType(uri,mime);
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).setClipData(ClipData.newRawUri(e.name,uri));try{startActivity(Intent.createChooser(intent,share?"Share":"Open with"));}catch(Exception failure){toast("No compatible app");}});});}
+        String failure=ExternalFileActions.launch(this,uri,e.name,share);
+        if(failure!=null)showError(failure);});});}
     private void openDevice(DeviceSearch.Result result){if(result==null)return;try{
         if(result.domain==DeviceSearch.APPS){Intent launch=getPackageManager().getLaunchIntentForPackage(result.packageName);if(launch!=null)startActivity(launch);else startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+result.packageName)));}
-        else if(result.domain==DeviceSearch.CONTACTS){new AlertDialog.Builder(this).setTitle(result.title).setMessage(result.detail).setPositiveButton("Open contact",(d,w)->{try{startActivity(new Intent(Intent.ACTION_VIEW,result.uri));}catch(Exception failure){toast("Contact unavailable");}}).setNegativeButton("Close",null).show();}
-        else new AlertDialog.Builder(this).setTitle(result.title).setMessage(result.detail).setPositiveButton("Open messages",(d,w)->{try{startActivity(new Intent(Intent.ACTION_VIEW,result.uri));}catch(Exception failure){toast("Messages unavailable");}}).setNegativeButton("Close",null).show();
+        else {
+            if(activeSheet!=null)activeSheet.dismiss();
+            activeSheet=DeviceDetails.open(this,result,closed->{if(activeSheet==closed)activeSheet=null;});
+        }
         }catch(Exception failure){showError(failure.getMessage());}}
-    private void properties(FileEntry e){dialog(e.name,e.path()+"\n\n"+(e.directory?"Folder":size(e.size))+"\nModified "+DateFormat.getDateTimeInstance().format(new Date(e.modified)));}
+    private void properties(FileEntry e){FileProperties.show(this,e,e.path(),index);}
     private void copyPath(String value){getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("File path",value));haptic(results);toast("Path copied");}
     private void stats(){FileIndex.State s=index.getState();dialog("Index",format(s.entries.size())+" files and folders\n"+(index.isRootEnabled()?"Root folders":"Shared storage")+"\n\nLast scan "+(s.lastScanMillis==0?"Never":DateFormat.getDateTimeInstance().format(new Date(s.lastScanMillis)))+
         "\nScan "+String.format(Locale.getDefault(),"%.2f s",s.scanDurationMillis/1000.0)+"\nSearch "+lastSearchMillis+" ms\n\n"+s.status+"\n\n"+format(s.watchCount)+" directory watches\n"+format(s.deniedDirectories)+" inaccessible directories");}
@@ -1380,8 +2604,107 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         format.setMaximumFractionDigits(digits);
         return format.format(amount) + " " + SIZE_UNITS[unit];
     }
+    private String previewWindowLabel(Bundle state){
+        String name=state.getString("fileName","File");
+        File parent=new File(state.getString("filePath","")).getParentFile();
+        if(parent==null)return name;
+        String folder=parent.getName();
+        File ancestor=parent.getParentFile();
+        if(ancestor!=null&&!ancestor.getName().isEmpty())folder=ancestor.getName()+"/"+folder;
+        return folder.isEmpty()?name:name+" · "+folder;
+    }
+    private void updatePreviewDock(){
+        if(previewDock==null)return;
+        int count=minimizedPreviews.size();
+        previewDock.setVisibility(count==0?View.GONE:View.VISIBLE);
+        if(count>0){
+            resumePreview.setText(count==1?"Resume · "+minimizedPreviews.get(0).getString("fileName","File")
+                    :"Resume latest · "+count+" previews");
+            resumePreview.setContentDescription(count==1?"Resume minimized preview":"Resume latest of "+count+" previews");
+        }
+    }
+    private void discardMinimizedPreview(int position){
+        if(position<0||position>=minimizedPreviews.size())return;
+        Bundle state=minimizedPreviews.remove(position);
+        PreviewSession.release(state.getString(PreviewSession.EXTRA));
+    }
+    private void restoreMinimizedPreview(){restoreMinimizedPreview(0);}
+    private void restoreMinimizedPreview(int position){
+        if(position<0||position>=minimizedPreviews.size()||openingPreview)return;
+        Bundle state=minimizedPreviews.get(position);
+        if(state.getBoolean("fileRoot")&&!index.isRootEnabled()){
+            discardMinimizedPreview(position);updatePreviewDock();toast("Reopen this file with the current storage access.");
+            return;
+        }
+        minimizedPreviews.remove(position);updatePreviewDock();
+        startActivityForResult(FileViewerActivity.restoreIntent(this,state),21);
+    }
+    private void rememberMinimizedPreview(Bundle paused){
+        String path=paused.getString("filePath");
+        String sessionId=paused.getString(PreviewSession.EXTRA);
+        for(int i=minimizedPreviews.size()-1;i>=0;i--){
+            Bundle existing=minimizedPreviews.get(i);
+            if(!Objects.equals(path,existing.getString("filePath"))
+                    ||paused.getBoolean("fileRoot")!=existing.getBoolean("fileRoot"))continue;
+            if(Objects.equals(sessionId,existing.getString(PreviewSession.EXTRA)))minimizedPreviews.remove(i);
+            else discardMinimizedPreview(i);
+        }
+        if(minimizedPreviews.size()>=MAX_PREVIEW_WINDOWS){
+            discardMinimizedPreview(minimizedPreviews.size()-1);
+            toast("Closed the oldest preview to keep four windows open.");
+        }
+        minimizedPreviews.add(0,paused);
+        updatePreviewDock();
+    }
+    private boolean handlePreviewNavigationResult(Intent data){
+        Bundle paused=data.getBundleExtra(FileViewerActivity.EXTRA_MINIMIZED);
+        if(paused!=null){
+            rememberMinimizedPreview(paused);return true;
+        }
+        String path=data.getStringExtra(FileViewerActivity.EXTRA_REVEAL);
+        if(path==null)return false;
+        String sessionId=data.getStringExtra(PreviewSession.EXTRA);
+        PreviewSession source=PreviewSession.get(sessionId);
+        boolean sourceUsedRoot=source!=null&&source.root;
+        if(sessionId!=null)PreviewSession.release(sessionId);
+        if(sourceUsedRoot&&!index.isRootEnabled()){toast("Reopen this file with the current storage access.");return true;}
+        revealPreviewFile(path);return true;
+    }
+    private void revealPreviewFile(String rawPath){
+        if(!rawPath.startsWith("/")||rawPath.indexOf(0)>=0)return;
+        String path=normalizeFolderPath(rawPath);
+        String parent=new File(path).getParent();
+        if(parent==null)return;
+        if(!parent.equals(folderScope)||!isFileManager()||storageMap||query.length()>0){
+            if(folderHistory.size()>=64)folderHistory.remove(0);folderHistory.add(browseLocation());
+        }
+        restoringWorkspace=true;
+        try{
+            clearSelection();clearResultRows();adapter.notifyDataSetChanged();
+            storageMap=false;mapSearchResults=false;resultMapReturn=null;mapList=false;folderScope=parent;subtype=null;subtypeCategory=FILE_MANAGER;
+            category.setSelection(FILE_MANAGER);query.dismissDropDown();query.setText("");query.clearFocus();
+            if(index.isRootEnabled()&&!isInside(parent,internalStoragePath())){
+                boolean removable=false;for(String volume:removableLocations().values())removable|=isInside(parent,volume);
+                if(!removable)rootHome="/";
+            }
+            prefs.edit().putBoolean("storageMap",false).putBoolean("mapSearchResults",false).putInt("filter",FILE_MANAGER).apply();
+        }finally{restoringWorkspace=false;}
+        revealedPreviewPath=path;browseRestore=new Bundle();browseRestore.putString("anchor",path);
+        browseRestore.putString("scope",folderScope);browseRestore.putString("rootHome",rootHome);
+        optionsButton.setVisibility(View.VISIBLE);sortButton.setVisibility(View.VISIBLE);
+        replaceResults();runSearch();saveBrowseLocation();
+    }
     @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);
-        if(request==21&&result==RESULT_OK&&data!=null){PreviewSession browsing=PreviewSession.get(data.getStringExtra(PreviewSession.EXTRA));
+        if(request==DualPaneManager.PREVIEW_REQUEST){
+            if(result==RESULT_OK&&data!=null&&handlePreviewNavigationResult(data))return;
+            if(data!=null)PreviewSession.release(data.getStringExtra(PreviewSession.EXTRA));
+            if(result==RESULT_OK&&data!=null&&data.getBooleanExtra("preview.paste",false))paste();
+            else ui.post(this::showDualPane);
+            return;
+        }
+        if(request==21&&result==RESULT_OK&&data!=null){
+            if(handlePreviewNavigationResult(data))return;
+            PreviewSession browsing=PreviewSession.get(data.getStringExtra(PreviewSession.EXTRA));
             if(browsing!=null){selection.clear();selection.addAll(browsing.selected.keySet());allSelected=false;selectionMode=!selection.isEmpty();updateSelection();adapter.notifyDataSetChanged();PreviewSession.release(browsing.id);}
             updateClipboard();if(data.getBooleanExtra("preview.paste",false))paste();return;}
         if(request!=20||result!=RESULT_OK||data==null||data.getData()==null)return;
@@ -1396,14 +2719,15 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
         public View getView(int p,View reuse,ViewGroup parent){return make(p,reuse,false);}public View getDropDownView(int p,View reuse,ViewGroup parent){return make(p,reuse,true);}
         private View make(int p,View reuse,boolean dropdown){LinearLayout r;if(reuse==null){r=row();r.setPadding(dp(10),0,dp(8),0);ImageView i=new ImageView(MainActivity.this);i.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);r.addView(i,new LinearLayout.LayoutParams(dp(22),dp(22)));TextView label=text("",14);label.setPadding(dp(10),0,dp(2),0);label.setSingleLine();label.setEllipsize(TextUtils.TruncateAt.END);r.addView(label,new LinearLayout.LayoutParams(0,dp(48),1));r.setTag(new Object[]{i,label});}else r=(LinearLayout)reuse;
             int type=p==FILE_MANAGER?2:p;
-            Object[] h=(Object[])r.getTag();((ImageView)h[0]).setImageResource(FileTypes.ICONS[type]);((ImageView)h[0]).setImageTintList(ColorStateList.valueOf(UiTheme.fileColor(MainActivity.this,type)));((TextView)h[1]).setText(!dropdown&&p==0&&multiTypes!=0?typeLabel():(String)getItem(p));r.setBackgroundColor(dropdown?theme.surface:Color.TRANSPARENT);return r;}
+            Object[] h=(Object[])r.getTag();((ImageView)h[0]).setImageResource(UiTheme.fileIcon(MainActivity.this,type));((ImageView)h[0]).setImageTintList(UiTheme.fileTint(MainActivity.this,type));((TextView)h[1]).setText(!dropdown&&p==FILE_MANAGER?"Files":!dropdown&&p==0&&multiTypes!=0?typeLabel():(String)getItem(p));r.setBackgroundColor(dropdown?theme.surface:Color.TRANSPARENT);return r;}
     }
     private static final class Holder {
-        LinearLayout root; FrameLayout picture; ImageView image; TextView check, name, path, size, date;
-        GradientDrawable card;
+        LinearLayout root; FrameLayout picture; ImageView image, check, appOwner; TextView name, path, size, date;
+        String ownerDescription,ownerActionDescription;
+        GradientDrawable card, selectionOutline;
         FileEntry entry;
         DeviceSearch.Result device;
-        boolean marked;
+        boolean marked,revealed;
     }
     private final class ResultsAdapter extends BaseAdapter implements SectionIndexer {
         List<FileEntry> items=Collections.emptyList();List<DeviceSearch.Result> devices=Collections.emptyList();
@@ -1445,31 +2769,59 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             h.entry = e;
             h.device = device;
             boolean marked = e != null && isSelected(e);
-            if (h.marked != marked) {
-                h.marked = marked;
-                h.check.setVisibility(marked ? View.VISIBLE : View.GONE);
+            boolean revealed=e!=null&&revealedPreviewPath!=null&&e.pathEquals(revealedPreviewPath);
+            if(h.marked!=marked||h.revealed!=revealed){
+                h.marked=marked;h.revealed=revealed;
+                h.check.setVisibility(marked ? View.VISIBLE : View.INVISIBLE);
+                h.root.setActivated(marked);
                 if (h.card != null) {
-                    h.card.setColor(marked ? theme.selected : theme.surface);
-                    h.card.setStroke(dp(1), marked ? BLUE : LINE);
-                } else h.root.setBackgroundColor(marked ? theme.selected : theme.surface);
+                    h.card.setColor(marked||revealed?theme.selected:theme.surface);
+                    h.card.setStroke(dp(1),marked?theme.selectionLine():revealed?BLUE:LINE);
+                } else {
+                    h.root.setBackgroundColor(marked||revealed?theme.selected:theme.surface);
+                    h.root.setForeground(marked?h.selectionOutline:null);
+                }
             }
-            if(e!=null){h.name.setText(e.name);if (activeLayout==1) h.path.setText(e.parent);
+            if(e!=null){h.name.setText(e.name);if (activeLayout==1) h.path.setText(displayFolderPath(e.parent));
                 Long mappedSize=storageMap?mapSizes.get(e.path()):null;
-                String formatted=mappedSize!=null?size(mappedSize):e.directory?"":size(e.size);
+                String formatted=mappedSize!=null?(mappedSize<0?"Unknown size":size(mappedSize)):e.directory?"":size(e.size);
                 h.size.setText(formatted);h.date.setText(dateLabel(e.modified));
-                thumbnails.bind(h.image,e,iconEdge,index.isRootEnabled());h.picture.setContentDescription((activeLayout==3?"Preview ":"Select ")+e.name);
-                h.root.setContentDescription(e.name+", "+e.parent+(e.directory?", folder":", "+formatted));
+                thumbnails.bind(h.image,e,iconEdge,index.isRootEnabled());
+                h.ownerActionDescription=(selectionMode?(marked?"Deselect ":"Select "):activeLayout==3?"Preview ":"Select ")+e.name;
+                h.ownerDescription=e.name+", "+e.parent+(e.directory?", folder":", "+formatted)+(revealed?", revealed file":"")+(marked?", selected":"");
             }else{h.name.setText(device.title);if (activeLayout==1) h.path.setText(device.subtitle);h.size.setText("");h.date.setText(device.domain==DeviceSearch.APPS?"App":device.domain==DeviceSearch.CONTACTS?"Contact":"SMS");
-                int type=device.domain==DeviceSearch.APPS?9:device.domain==DeviceSearch.CONTACTS?10:11;h.image.setTag(null);h.image.setTag(R.id.thumbnail_placeholder,null);h.image.setImageResource(FileTypes.ICONS[type]);h.image.setImageTintList(ColorStateList.valueOf(UiTheme.fileColor(MainActivity.this,type)));h.image.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                if(device.domain==DeviceSearch.APPS)thumbnails.bindApp(h.image,device.packageName);h.root.setContentDescription(device.title+", "+device.subtitle);}
+                if(device.domain==DeviceSearch.APPS)thumbnails.bindApp(h.image,device.packageName);
+                else{
+                    int type=device.domain==DeviceSearch.CONTACTS?10:11;
+                    thumbnails.clearBinding(h.image);h.image.setTag(R.id.thumbnail_placeholder,null);
+                    h.image.setImageResource(UiTheme.fileIcon(MainActivity.this,type));h.image.setImageTintList(UiTheme.fileTint(MainActivity.this,type));h.image.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+                }
+                h.ownerDescription=device.title+", "+device.subtitle;
+                h.ownerActionDescription="Open "+device.title;}
+            h.root.setContentDescription(h.ownerDescription);
+            h.picture.setContentDescription(h.ownerActionDescription);
+            appOwnerBadges.bind(h.root,e,badge->{
+                AppOwnerBadges.present(h.appOwner,theme,badge);
+                h.root.setContentDescription(AppOwnerBadges.describe(h.ownerDescription,badge));
+                h.picture.setContentDescription(AppOwnerBadges.describe(h.ownerActionDescription,badge));
+            });
             return h.root;}
         // SDK 36 annotates these API 23 Layout constants using the equal-valued API 29 LineBreaker constants.
         @android.annotation.SuppressLint("WrongConstant")
         private Holder makeHolder(int style){Holder h=new Holder();h.root=new LinearLayout(MainActivity.this);h.root.setTag(h);h.root.setGravity(Gravity.CENTER_VERTICAL);h.root.setPadding(dp(8),dp(2),dp(8),dp(2));
-            h.picture=new FrameLayout(MainActivity.this);h.image=new ImageView(MainActivity.this);h.image.setId(R.id.file_icon);h.image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            int inset=style==3?0:dp(style==2?12:6);h.picture.setPadding(inset,inset,inset,inset);h.picture.addView(h.image,new FrameLayout.LayoutParams(-1,-1));
-            h.check=text("✓",16);h.check.setTextColor(theme.dark?theme.surface:Color.WHITE);h.check.setGravity(Gravity.CENTER);h.check.setBackground(background(BLUE,12));h.check.setContentDescription("Toggle selection");
-            h.check.setVisibility(View.GONE);
+            FileSelectionMark.Picture pictureFrame=new FileSelectionMark.Picture(MainActivity.this);
+            h.picture=pictureFrame;h.image=new ImageView(MainActivity.this);h.image.setId(R.id.file_icon);h.image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            int inset=style==3?0:dp(style==2?12:6);
+            h.picture.setPadding(inset,inset,inset,inset);
+            h.picture.addView(h.image,new FrameLayout.LayoutParams(-1,-1));
+            h.appOwner=AppOwnerBadges.overlay(MainActivity.this);
+            int ownerEdge=dp(style==3?16:12);
+            h.picture.addView(h.appOwner,new FrameLayout.LayoutParams(ownerEdge,ownerEdge,Gravity.RIGHT|Gravity.BOTTOM));
+            pictureFrame.ownerMark(h.appOwner);
+            h.check=new ImageView(MainActivity.this);h.check.setId(R.id.file_selection_mark);
+            h.check.setImageDrawable(FileSelectionMark.create(MainActivity.this,theme));
+            h.check.setContentDescription("Deselect file");
+            h.check.setVisibility(View.INVISIBLE);
             h.picture.setOnClickListener(v -> {
                 if (h.entry == null) openDevice(h.device);
                 else if (!longPressConsumed) {
@@ -1479,11 +2831,18 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
             });
             h.picture.setOnLongClickListener(v -> {
                 if (h.entry == null) return false;
-                beginSelection(h.entry, v);
+                handleFileHold(h.entry, v);
                 return true;
             });
-            h.check.setOnClickListener(v -> { if (h.entry != null) toggle(h.entry, v); });
-            FrameLayout.LayoutParams checkParams=new FrameLayout.LayoutParams(dp(24),dp(24),Gravity.TOP|Gravity.END);h.picture.addView(h.check,checkParams);
+            h.check.setOnClickListener(v -> { if (h.entry != null && !longPressConsumed) toggle(h.entry, v); });
+            h.check.setOnLongClickListener(v -> {
+                if (h.entry == null) return false;
+                handleFileHold(h.entry,h.root);
+                return true;
+            });
+            int badge=dp(style==3?14:12);
+            h.picture.addView(h.check,new FrameLayout.LayoutParams(badge,badge,Gravity.RIGHT|Gravity.TOP));
+            pictureFrame.marks(h.image,h.check);
             h.name=text("",14);h.name.setEllipsize(TextUtils.TruncateAt.MIDDLE);h.path=text("",11);h.path.setTextColor(MUTED);h.path.setSingleLine();h.path.setEllipsize(TextUtils.TruncateAt.MIDDLE);
             h.size=text("",11);h.date=text("",10.5f);h.size.setTextColor(MUTED);h.date.setTextColor(MUTED);
             if(style==3){h.root.setOrientation(LinearLayout.VERTICAL);h.root.setGravity(Gravity.TOP|Gravity.START);
@@ -1496,7 +2855,9 @@ public final class MainActivity extends Activity implements FileIndex.Listener {
                 h.root.addView(h.name,new LinearLayout.LayoutParams(-1,labelHeight));h.path.setVisibility(View.GONE);
                 LinearLayout meta=row();meta.setPadding(dp(6),0,dp(6),0);h.size.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);h.size.setSingleLine();h.date.setSingleLine();h.size.setEllipsize(TextUtils.TruncateAt.END);h.date.setEllipsize(TextUtils.TruncateAt.END);
                 int metaHeight=Math.max(dp(16),h.size.getLineHeight());meta.addView(h.size,new LinearLayout.LayoutParams(0,metaHeight,1));h.date.setGravity(Gravity.END|Gravity.CENTER_VERTICAL);meta.addView(h.date,new LinearLayout.LayoutParams(0,metaHeight,1.5f));h.root.addView(meta);
-            }else{h.root.setBackgroundColor(theme.surface);h.root.setOrientation(LinearLayout.HORIZONTAL);h.root.setMinimumHeight(dp(style==2?48:54));h.root.addView(h.picture,new LinearLayout.LayoutParams(dp(48),dp(48)));
+            }else{h.root.setBackgroundColor(theme.surface);h.root.setOrientation(LinearLayout.HORIZONTAL);h.root.setMinimumHeight(dp(style==2?48:54));
+                h.selectionOutline=FileSelectionMark.outline(theme,dp(1),dp(6));
+                h.root.addView(h.picture,new LinearLayout.LayoutParams(dp(48),dp(48)));
                 LinearLayout names=new LinearLayout(MainActivity.this);names.setOrientation(LinearLayout.VERTICAL);names.setPadding(dp(2),0,dp(6),0);h.name.setSingleLine();names.addView(h.name,new LinearLayout.LayoutParams(-1,dp(20)));if(style!=2)names.addView(h.path,new LinearLayout.LayoutParams(-1,dp(16)));
                 h.root.addView(names,new LinearLayout.LayoutParams(0,-2,1));LinearLayout meta=new LinearLayout(MainActivity.this);meta.setOrientation(LinearLayout.VERTICAL);h.size.setGravity(Gravity.END);h.date.setGravity(Gravity.END);meta.addView(h.size,new LinearLayout.LayoutParams(-1,dp(15)));meta.addView(h.date,new LinearLayout.LayoutParams(-1,dp(14)));h.root.addView(meta,new LinearLayout.LayoutParams(dp(62),-2));}
             return h;}

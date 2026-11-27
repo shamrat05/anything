@@ -13,6 +13,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -28,6 +31,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Prepare signing key
         env:
+          FASTSEARCH_REQUIRE_PUBLISHED_SIGNER: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && '1' || '0' }}
           FASTSEARCH_SIGNING_BUNDLE: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && secrets.FASTSEARCH_SIGNING_BUNDLE || '' }}
         run: python3 scripts/setup-signing.py
       - name: Check query and root protocol semantics
@@ -39,6 +43,16 @@ jobs:
         run: scripts/build.sh :app:assembleFullDebug :app:assembleFullRelease :app:assembleGithubRelease :app:bundlePlayRelease :app:assembleFullDebugAndroidTest :app:lintFullDebug :app:lintGithubRelease :app:lintPlayRelease --console=plain
       - name: Package APKs, source and checksums
         run: python3 scripts/package.py
+      - name: Verify both editions can use the published signing identity
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        timeout-minutes: 5
+        run: |
+          mkdir -p upgrade-baseline
+          base=https://github.com/shamrat05/anything/releases/download/v1.0.1-build.3
+          curl -fLSs --retry 2 "$base/anything-play.apk" -o upgrade-baseline/standard.apk
+          curl -fLSs --retry 2 "$base/anything-with-sms.apk" -o upgrade-baseline/sms.apk
+          python3 scripts/verify-signed-upgrade.py standard upgrade-baseline/standard.apk dist/anything.apk | tee dist/STANDARD-UPGRADE-IDENTITY.txt
+          python3 scripts/verify-signed-upgrade.py sms upgrade-baseline/sms.apk dist/anything-with-sms.apk | tee dist/SMS-UPGRADE-IDENTITY.txt
       - uses: actions/upload-artifact@v4
         with:
           name: anything-android-${{ github.sha }}

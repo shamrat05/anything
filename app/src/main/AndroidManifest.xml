@@ -13,6 +13,18 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <!-- System-local Create Document for read-only Smali exports. -->
+        <intent>
+            <action android:name="android.intent.action.CREATE_DOCUMENT" />
+            <category android:name="android.intent.category.OPENABLE" />
+            <data android:mimeType="application/octet-stream" />
+        </intent>
+        <provider android:authorities="com.android.externalstorage.documents;com.android.providers.downloads.documents" />
+        <!-- Only apps that can open user-selected content URIs; not QUERY_ALL_PACKAGES. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="content" android:mimeType="*/*" />
+        </intent>
     </queries>
     <application android:requestLegacyExternalStorage="true" android:theme="@style/AppTheme" android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules" android:largeHeap="true" android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
@@ -21,8 +33,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <receiver android:name=".AnythingWidgetProvider$Search" android:exported="false" android:label="@string/widget_search_name">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_search" />
+        </receiver>
+        <receiver android:name=".AnythingWidgetProvider$Files" android:exported="false" android:label="@string/widget_files_name">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_files" />
+        </receiver>
         <service android:name=".IndexService" android:exported="false" android:foregroundServiceType="dataSync" />
         <service android:name=".FileOperationService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <activity android:name=".DexViewerActivity" android:exported="false" />
         <activity android:name=".FileViewerActivity" android:exported="false" />
         <provider android:name=".RootFileProvider" android:authorities="${applicationId}.files" android:exported="false" android:grantUriPermissions="true" />
     </application>

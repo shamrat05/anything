@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="StorageDrawerMotion">
+        <item name="android:windowEnterAnimation">@anim/storage_drawer_in</item>
+        <item name="android:windowExitAnimation">@anim/storage_drawer_out</item>
+    </style>
+    <style name="StorageDrawerMotionRtl">
+        <item name="android:windowEnterAnimation">@anim/storage_drawer_in_rtl</item>
+        <item name="android:windowExitAnimation">@anim/storage_drawer_out_rtl</item>
+    </style>
+</resources>

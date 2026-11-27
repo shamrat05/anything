@@ -3,7 +3,6 @@ package dev.fastsearch.android;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -22,7 +21,6 @@ import android.graphics.pdf.PdfRenderer;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
-import android.media.ExifInterface;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
@@ -44,7 +42,6 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.webkit.MimeTypeMap;
 import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -59,6 +56,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.util.LruCache;
+import java.io.File;
 import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.text.NumberFormat;
@@ -76,10 +74,14 @@ import dev.fastsearch.core.FileEntry;
 public final class FileViewerActivity extends Activity {
     private int INK = 0xFF202020, MUTED = 0xFF60656B, CHROME = 0xFFF0F1FA, ACCENT = 0xFF1A2FFB;
     private UiTheme theme;
+    private FileHoldActions previewActions;
     private AppSheet activeSheet;
+    private MenuDialog languageMenu, previewSelectionMenu;
+    private FolderPathDialog extractFolderPicker;
     private boolean sharingArchiveEntry;
     private static final int MAX_ARCHIVE_IMAGE_BYTES = 16 * 1024 * 1024;
-    private boolean readerSource;
+    private boolean readerSource, plainTextOverride;
+    private CodeSyntax.Language readerLanguage;
     private int readerSize=16;
     private float playbackSpeed=1;
     static final int MAX_BITMAP_EDGE = 2048, MAX_BITMAP_PIXELS = 4 * 1024 * 1024;
@@ -87,8 +89,10 @@ public final class FileViewerActivity extends Activity {
     static final long MAX_DOCUMENT_BYTES = 128L * 1024 * 1024;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final ThreadPoolExecutor PREVIEWS = createExecutor();
+    static final String EXTRA_MINIMIZED = "preview.minimized", EXTRA_REVEAL = "preview.reveal";
+    private static final String EXTRA_RESTORE = "preview.restore";
     private static final String EXTRA_NAME = "preview.name", EXTRA_PATH = "preview.path", EXTRA_SIZE = "preview.size";
-    private enum Kind { IMAGE, SVG, VIDEO, AUDIO, PDF, TEXT, MARKDOWN, HTML, ZIP, OTHER }
+    private enum Kind { IMAGE, SVG, VIDEO, AUDIO, PDF, TEXT, MARKDOWN, HTML, OFFICE, ZIP, STREAM_ARCHIVE, SEVEN_Z, APK, DEX, OTHER }
     private static final int CACHE_BYTES=(int)Math.min(24L*1024*1024,Math.max(4L*1024*1024,Runtime.getRuntime().maxMemory()/16));
     private static final LruCache<String, PreviewData> CACHE=new LruCache<String, PreviewData>(CACHE_BYTES){
         @Override protected int sizeOf(String key,PreviewData data){return data.bytes;}
@@ -129,21 +133,39 @@ public final class FileViewerActivity extends Activity {
     private PreviewSession session;
     private ThumbnailLoader thumbnails;
     private TextView title, filePosition;
-    private ImageButton location;
+    private ImageButton location, focusAction, moreAction;
+    private View formatGuideTarget, mediaLoading;
+    private SpotlightTour viewerGuide;
+    static final String EXTRA_OTHER_PANE="preview.otherPane";
+    private String otherPaneTarget;
+    private boolean viewerTransfer,viewerTransferSeen,viewerMove;
+    private final FileOperationService.Listener viewerTransferListener=this::viewerTransferStatus;
+    private View viewerIdentity, navigationDock;
+    private boolean focusMode;
+    private Bundle minimizeResult;
+    private String revealResult;
     private LinearLayout fileNavigation;
-    private ImageButton previousFile, nextFile, selectFile, copyFile, moveFile, pasteFile;
+    private ImageButton previousFile, nextFile, selectFile, copyFile, moveFile, deleteSelected;
     private View navigationPlaceholder;
     private View loadingPlaceholder;
     private LinearLayout selectedStrip;
     private HorizontalScrollView selectedScroll;
+    private LinearLayout selectedTray;
     private ProgressBar selectionProgress;
-    private boolean selectionBusy, pasteAfterPreview;
+    private boolean selectionBusy, pasteAfterPreview, extracting;
     private final ThreadPoolExecutor actions = new ThreadPoolExecutor(1,1,15,TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(2), task -> new Thread(task,"preview-file-action"),new ThreadPoolExecutor.AbortPolicy());
 
     public static Intent intent(Context context, Uri uri, String name, String path, long size) {
         return new Intent(context, FileViewerActivity.class).setData(uri)
                 .putExtra(EXTRA_NAME, name).putExtra(EXTRA_PATH, path).putExtra(EXTRA_SIZE, size);
+    }
+
+    /** Only locally opened file metadata is returned. No URI, descriptor, View or bitmap is docked. */
+    static Intent restoreIntent(Context context, Bundle state) {
+        return intent(context,null,state.getString("fileName"),state.getString("filePath"),state.getLong("fileSize",-1))
+                .putExtra(PreviewSession.EXTRA,state.getString(PreviewSession.EXTRA))
+                .putExtra(EXTRA_RESTORE,new Bundle(state));
     }
 
     private static ThreadPoolExecutor createExecutor() {
@@ -158,6 +180,10 @@ public final class FileViewerActivity extends Activity {
     @Override public void onCreate(Bundle saved) {
         theme=UiTheme.apply(this);INK=theme.ink;MUTED=theme.muted;CHROME=theme.chrome;ACCENT=theme.accent;
         super.onCreate(saved);
+        previewActions=new FileHoldActions(theme,(x,y)->null);
+        if(saved==null)saved=getIntent().getBundleExtra(EXTRA_RESTORE);
+        getIntent().removeExtra(EXTRA_RESTORE);
+        focusMode=saved!=null&&saved.getBoolean("focusMode",false);
         readerSize=Math.max(12,Math.min(26,getSharedPreferences("ui",0).getInt("readerSize",16)));readerSource=saved!=null&&saved.getBoolean("readerSource",false);
         if(saved!=null){playbackSpeed=saved.getFloat("playbackSpeed",1);WindowManager.LayoutParams attributes=getWindow().getAttributes();attributes.screenBrightness=saved.getFloat("brightness",-1);getWindow().setAttributes(attributes);}
         uri = getIntent().getData();
@@ -174,7 +200,12 @@ public final class FileViewerActivity extends Activity {
             restoreOnLoad=false;
             name=saved.getString("fileName",name);path=saved.getString("filePath",path);size=saved.getLong("fileSize",size);
             String restoredUri=saved.getString("fileUri");if(restoredUri!=null)uri=Uri.parse(restoredUri);
-            if(session!=null)session.position=Math.max(0,Math.min(session.entries.size()-1,saved.getInt("filePosition",session.position)));
+            if(session!=null){
+                int restoredPosition=saved.getInt("filePosition",session.position);
+                if(restoredPosition>=0&&restoredPosition<session.entries.size()
+                        &&session.entries.get(restoredPosition).pathEquals(path))session.position=restoredPosition;
+                else session=null;
+            }
             page = Math.max(0, saved.getInt("page", 0));
             mediaPosition = Math.max(0, saved.getInt("mediaPosition", 0));
             playWhenReady = saved.getBoolean("playing", false);
@@ -184,10 +215,16 @@ public final class FileViewerActivity extends Activity {
             archivePosition = Math.max(0, saved.getInt("archivePosition", 0)); archiveTop = saved.getInt("archiveTop", 0);
         }
         mime=mimeFor(name);kind=kindFor(name,mime);
+        if(saved!=null && saved.getString("readerLanguage")!=null)
+            try{readerLanguage=CodeSyntax.Language.valueOf(saved.getString("readerLanguage"));}
+            catch(IllegalArgumentException ignored){}
+        plainTextOverride=saved!=null&&saved.getBoolean("plainTextOverride")&&canReadAsText();
+        if(plainTextOverride)kind=Kind.TEXT;
         if(saved!=null&&uri==null&&session==null&&!path.isEmpty()){
             session=PreviewSession.create(java.util.Collections.singletonList(new FileEntry(path,false,size,-1)),path,saved.getBoolean("fileRoot",false));
             getIntent().putExtra(PreviewSession.EXTRA,session.id);
         }
+        otherPaneTarget=getIntent().getStringExtra(EXTRA_OTHER_PANE);
         buildUi();
         if(Build.VERSION.SDK_INT>=34){overrideActivityTransition(OVERRIDE_TRANSITION_OPEN,R.anim.preview_enter,0);
             overrideActivityTransition(OVERRIDE_TRANSITION_CLOSE,0,R.anim.preview_exit);}
@@ -198,8 +235,14 @@ public final class FileViewerActivity extends Activity {
 
     @android.annotation.SuppressLint("GestureBackNavigation")
     @Override public void onBackPressed(){handleBack();}
-    private void handleBack(){if(session!=null&&!session.selected.isEmpty()){session.selected.clear();updateFileControls();}else finish();}
+    private void handleBack(){if(previewActions!=null&&previewActions.isOpen()){previewActions.stop();return;}if(viewerGuide!=null){stopViewerGuide();return;}if(focusMode){setFocusMode(false);return;}if(session!=null&&!session.selected.isEmpty()){session.selected.clear();updateFileControls();}else finish();}
     @Override public boolean dispatchKeyEvent(KeyEvent event){int key=event.getKeyCode();
+        if(event.getAction()==KeyEvent.ACTION_DOWN&&event.getRepeatCount()==0&&!selectionBusy&&viewerGuide==null){
+            if(key==KeyEvent.KEYCODE_ESCAPE&&focusMode){setFocusMode(false);return true;}
+            if(event.isAltPressed()&&(key==KeyEvent.KEYCODE_DPAD_LEFT||key==KeyEvent.KEYCODE_DPAD_RIGHT)){
+                navigate(key==KeyEvent.KEYCODE_DPAD_LEFT?-1:1);return session!=null&&session.entries.size()>1;
+            }
+        }
         if(controller!=null&&(key==KeyEvent.KEYCODE_HEADSETHOOK||key==KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE||key==KeyEvent.KEYCODE_SPACE
                 ||key==KeyEvent.KEYCODE_MEDIA_PLAY||key==KeyEvent.KEYCODE_MEDIA_STOP||key==KeyEvent.KEYCODE_MEDIA_PAUSE))return controller.dispatchKeyEvent(event);
         return super.dispatchKeyEvent(event);}
@@ -214,7 +257,7 @@ public final class FileViewerActivity extends Activity {
     }
 
     @Override protected void onStart() {
-        super.onStart(); started = true;thumbnails.resume();
+        super.onStart(); started = true;thumbnails.resume();FileOperationService.addListener(viewerTransferListener);
         {
             IntentFilter filter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
             if (Build.VERSION.SDK_INT >= 33) registerReceiver(noisy, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -225,7 +268,9 @@ public final class FileViewerActivity extends Activity {
     }
 
     @Override protected void onStop() {
-        thumbnails.pause();
+        if(languageMenu!=null)languageMenu.dismiss();
+        if(previewActions!=null)previewActions.stop();
+        FileOperationService.removeListener(viewerTransferListener);stopViewerGuide();thumbnails.pause();
         if(activeSheet!=null&&!sharingArchiveEntry){activeSheet.dismiss();activeSheet=null;}
         rememberFile(); started = false; cancelLoad(); releaseMedia(); clearShown();
         ((PreviewStage)stage).reset();navigationPlaceholder=loadingPlaceholder=null;stage.removeAllViews();previewContent=null; image = null; textScroll = null; archiveList = null; mediaAnchor = null; surface = null;
@@ -239,23 +284,34 @@ public final class FileViewerActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if(previewSelectionMenu!=null)previewSelectionMenu.dismiss();
+        if(previewActions!=null)previewActions.stop();
+        stopViewerGuide();
         if (activeSheet != null) activeSheet.dismiss();
         destroyed = true; cancelLoad(); releaseMedia(); clearShown(); ui.removeCallbacksAndMessages(null);
         actions.shutdownNow();thumbnails.close();stage.animate().cancel();
-        if(session!=null&&isFinishing()){String id=session.id;MAIN.postDelayed(()->PreviewSession.release(id),60_000);}
+        if(isFinishing())ArchivePreviewSources.release(uri);
+        if(session!=null&&isFinishing()&&minimizeResult==null){String id=session.id;MAIN.postDelayed(()->PreviewSession.release(id),60_000);}
         super.onDestroy();
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
+        captureViewerState(out);
+        out.putString("fileUri",uri==null?null:uri.toString());
+        super.onSaveInstanceState(out);
+    }
+    private void captureViewerState(Bundle out) {
         rememberView(); snapshotMedia();
-        out.putString("fileName",name);out.putString("filePath",path);out.putLong("fileSize",size);out.putString("fileUri",uri==null?null:uri.toString());
+        out.putString("fileName",name);out.putString("filePath",path);out.putLong("fileSize",size);
+        out.putBoolean("focusMode",focusMode);
+        out.putBoolean("plainTextOverride",plainTextOverride);
+        if(readerLanguage!=null)out.putString("readerLanguage",readerLanguage.name());
         out.putBoolean("fileRoot",session!=null&&session.root);
         if(session!=null)out.putInt("filePosition",session.position);
         out.putFloat("playbackSpeed",playbackSpeed);out.putFloat("brightness",getWindow().getAttributes().screenBrightness);out.putBoolean("readerSource",readerSource);out.putInt("page", page); out.putInt("mediaPosition", mediaPosition); out.putBoolean("playing", playWhenReady);
         out.putBoolean("completed", mediaCompleted);
         out.putFloat("zoom", zoom); out.putFloat("centerX", centerX); out.putFloat("centerY", centerY);
         out.putInt("scrollY", scrollY); out.putInt("archivePosition", archivePosition); out.putInt("archiveTop", archiveTop);
-        super.onSaveInstanceState(out);
     }
 
     private void buildUi() {
@@ -267,25 +323,27 @@ public final class FileViewerActivity extends Activity {
             return insets.consumeSystemWindowInsets();
         });
         setContentView(root);
-        LinearLayout bar = row(); bar.setPadding(dp(4),dp(4),dp(4),dp(4));
-        ImageButton back = actionIcon(R.drawable.ic_back,"Back to results",View.NO_ID);
+        LinearLayout bar=row();bar.setPadding(dp(4),dp(2),dp(4),dp(2));bar.setMinimumHeight(dp(52));
+        ImageButton back=actionIcon(R.drawable.ic_back,"Back to files",View.NO_ID);
         back.setOnClickListener(view -> handleBack()); bar.addView(back);
-        LinearLayout identity = new LinearLayout(this); identity.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout identity = new LinearLayout(this); viewerIdentity=identity;identity.setOrientation(LinearLayout.VERTICAL);
         identity.setPadding(dp(4),dp(2),dp(4),dp(2));
-        title = text(name, 17, INK);title.setTypeface(getResources().getFont(R.font.aeonik_medium)); title.setSingleLine(true); title.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        title=text(name,15,INK);title.setTypeface(getResources().getFont(R.font.inter_semibold));
+        title.setSingleLine(true);title.setEllipsize(TextUtils.TruncateAt.MIDDLE);
         title.setOnLongClickListener(view->{selectCurrent();return true;});
         identity.addView(title);
-        details=text(metadata(),12,MUTED);details.setSingleLine(true);details.setEllipsize(TextUtils.TruncateAt.END);
+        details=text(metadata(),11,MUTED);details.setSingleLine(true);details.setEllipsize(TextUtils.TruncateAt.END);
         identity.addView(details); bar.addView(identity,new LinearLayout.LayoutParams(0,-2,1));
         location=actionIcon(R.drawable.ic_folder,"Show full path",R.id.preview_path);
-        location.setTooltipText(folderLabel());location.setImageTintList(ColorStateList.valueOf(ACCENT));
-        location.setBackground(controlBackground(theme.selected,24));location.setOnClickListener(view->showPath());
+        location.setTooltipText("File location");location.setOnClickListener(view->showPath());
         bar.addView(location);
-        ImageButton share=actionIcon(R.drawable.ic_share,"Share file",View.NO_ID);
-        share.setOnClickListener(view->sendCurrentFile(true));bar.addView(share);
-        ImageButton more=actionIcon(R.drawable.ic_more,"More file actions",View.NO_ID);
-        more.setOnClickListener(view->showFileActions(view));bar.addView(more);root.addView(bar);
-        notice = text("", 12, MUTED); notice.setPadding(dp(12), dp(6), dp(12), dp(6)); notice.setBackgroundColor(CHROME);notice.setVisibility(View.GONE);
+        focusAction=actionIcon(R.drawable.ic_preview_focus,"Enter focus mode",R.id.preview_focus);
+        focusAction.setOnClickListener(view->setFocusMode(!focusMode));bar.addView(focusAction);
+        moreAction=actionIcon(R.drawable.ic_more,"More file actions",View.NO_ID);
+        moreAction.setOnClickListener(view->showFileActions(view));bar.addView(moreAction);root.addView(bar,new LinearLayout.LayoutParams(-1,-2));
+        notice=text("",12,MUTED);notice.setPadding(dp(12),dp(6),dp(12),dp(6));
+        notice.setBackgroundColor(CHROME);notice.setVisibility(View.GONE);
+        notice.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         root.addView(notice,new LinearLayout.LayoutParams(-1,-2));
         FrameLayout viewport=new FrameLayout(this);
         stage = new PreviewStage();stage.setId(R.id.preview_stage);stage.setBackgroundColor(stageColor(kind));viewport.addView(stage,new FrameLayout.LayoutParams(-1,-1));
@@ -293,25 +351,61 @@ public final class FileViewerActivity extends Activity {
         selectionProgress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);selectionProgress.setIndeterminate(true);selectionProgress.setVisibility(View.GONE);
         root.addView(selectionProgress,new LinearLayout.LayoutParams(-1,dp(2)));
         selectedScroll=new HorizontalScrollView(this);selectedScroll.setOnScrollChangeListener((v,x,y,oldX,oldY)->thumbnails.viewportChanged());selectedScroll.setHorizontalScrollBarEnabled(false);selectedScroll.setBackgroundColor(CHROME);
-        selectedStrip=row();selectedStrip.setPadding(dp(8),dp(4),dp(8),dp(4));selectedScroll.addView(selectedStrip);root.addView(selectedScroll,new LinearLayout.LayoutParams(-1,dp(52)));
-        LinearLayout navigation=row();navigation.setPadding(dp(8),dp(4),dp(8),dp(4));navigation.setGravity(Gravity.CENTER_VERTICAL|Gravity.END);
-        fileNavigation=row();fileNavigation.setBackground(panel(CHROME,24));navigation.addView(fileNavigation);
-        previousFile=actionIcon(R.drawable.ic_back,"Previous file",R.id.preview_previous);previousFile.setOnClickListener(view->navigate(-1));fileNavigation.addView(previousFile);
-        filePosition=text("",12,MUTED);filePosition.setGravity(Gravity.CENTER);filePosition.setSingleLine(true);filePosition.setEllipsize(TextUtils.TruncateAt.END);
-        fileNavigation.addView(filePosition,new LinearLayout.LayoutParams(dp(64),dp(48)));
-        nextFile=actionIcon(R.drawable.ic_back,"Next file",R.id.preview_next);nextFile.setRotation(180);nextFile.setOnClickListener(view->navigate(1));fileNavigation.addView(nextFile);
+        selectedStrip=row();selectedStrip.setPadding(dp(6),0,dp(6),0);selectedScroll.addView(selectedStrip);
+        selectedTray=row();selectedTray.setBackgroundColor(CHROME);
+        selectedTray.addView(selectedScroll,new LinearLayout.LayoutParams(0,dp(48),1));
+        deleteSelected=actionIcon(R.drawable.ic_delete,"Delete selected files",R.id.preview_delete_selected);
+        deleteSelected.setOnClickListener(view->deleteSelectedFiles());
+        selectedTray.addView(deleteSelected,new LinearLayout.LayoutParams(dp(48),dp(48)));
+        root.addView(selectedTray,new LinearLayout.LayoutParams(-1,dp(48)));
+        LinearLayout navigation=row();navigation.setPadding(dp(4),0,dp(4),0);navigation.setGravity(Gravity.CENTER_VERTICAL|Gravity.END);
+        fileNavigation=row();navigation.addView(fileNavigation);
+        previousFile=actionIcon(R.drawable.ic_viewer_previous,"Previous file",R.id.preview_previous);
+        previousFile.setOnClickListener(view->navigate(-1));fileNavigation.addView(previousFile);
+        filePosition=text("",11,MUTED);filePosition.setGravity(Gravity.CENTER);filePosition.setSingleLine(true);filePosition.setEllipsize(TextUtils.TruncateAt.END);
+        fileNavigation.addView(filePosition,new LinearLayout.LayoutParams(-2,dp(48)));
+        nextFile=actionIcon(R.drawable.ic_viewer_next,"Next file",R.id.preview_next);
+        nextFile.setOnClickListener(view->navigate(1));fileNavigation.addView(nextFile);
+        navigation.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));
         selectFile=actionIcon(R.drawable.ic_select,"Select file",R.id.preview_select);selectFile.setOnClickListener(view->toggleCurrent());navigation.addView(selectFile);
         copyFile=actionIcon(R.drawable.ic_copy,"Copy files",R.id.preview_copy);copyFile.setOnClickListener(view->prepareClipboard(false));navigation.addView(copyFile);
         moveFile=actionIcon(R.drawable.ic_cut,"Move files",R.id.preview_move);moveFile.setOnClickListener(view->prepareClipboard(true));navigation.addView(moveFile);
-        pasteFile=actionIcon(R.drawable.ic_paste,"Paste files",R.id.preview_paste);pasteFile.setOnClickListener(view->{pasteAfterPreview=true;finish();});navigation.addView(pasteFile);
+        LinearLayout bottom=new LinearLayout(this);bottom.setOrientation(LinearLayout.VERTICAL);navigationDock=bottom;
+        bottom.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
         HorizontalScrollView dock=new HorizontalScrollView(this);dock.setFillViewport(true);dock.setHorizontalScrollBarEnabled(false);
-        dock.addView(navigation,new FrameLayout.LayoutParams(-2,-2));root.addView(dock);updateFileControls();
+        dock.addView(navigation,new FrameLayout.LayoutParams(-2,-2));bottom.addView(dock);root.addView(bottom);
+        updateFileControls();setFocusMode(focusMode);
+    }
+
+    private void setFocusMode(boolean enabled){
+        focusMode=enabled;
+        viewerIdentity.setVisibility(enabled?View.INVISIBLE:View.VISIBLE);
+        location.setVisibility(enabled?View.GONE:View.VISIBLE);
+        navigationDock.setVisibility(enabled?View.GONE:View.VISIBLE);
+        selectedTray.setVisibility(!enabled&&session!=null&&!session.selected.isEmpty()?View.VISIBLE:View.GONE);
+        focusAction.setImageResource(enabled?R.drawable.ic_preview_exit_focus:R.drawable.ic_preview_focus);
+        String action=enabled?"Exit focus mode":"Enter focus mode";
+        focusAction.setContentDescription(action);focusAction.setTooltipText(action);focusAction.setSelected(enabled);
+    }
+    private boolean canReturnFile(){return session!=null&&!session.entries.isEmpty()&&path.startsWith("/")&&!selectionBusy;}
+    private void minimize(){
+        if(!canReturnFile())return;
+        Bundle state=new Bundle();captureViewerState(state);
+        state.putString(PreviewSession.EXTRA,session.id);
+        // A minimized player must not start audio while the user is browsing or restoring it.
+        state.putBoolean("playing",false);
+        minimizeResult=state;finish();
+    }
+    private void revealFile(){
+        if(!canReturnFile())return;
+        revealResult=path;finish();
     }
 
     private ImageButton actionIcon(int resource,String label,int id){ImageButton button=new ImageButton(this,null,0);button.setId(id);button.setImageResource(resource);
         button.setImageTintList(android.content.res.ColorStateList.valueOf(INK));button.setContentDescription(label);button.setTooltipText(label);
-        button.setBackground(controlBackground(Color.TRANSPARENT,24));button.setPadding(dp(12),dp(12),dp(12),dp(12));
+        button.setBackground(controlBackground(Color.TRANSPARENT,12));button.setPadding(dp(14),dp(14),dp(14),dp(14));
         button.setLayoutParams(new LinearLayout.LayoutParams(dp(48),dp(48)));return button;}
+    private View viewerRule(){View view=new View(this);view.setBackgroundColor(theme.line);return view;}
     private GradientDrawable panel(int color,int radius) {
         GradientDrawable background=AppSheet.shape(color,dp(radius)); background.setStroke(dp(1),theme.line);return background;
     }
@@ -319,23 +413,199 @@ public final class FileViewerActivity extends Activity {
         return new RippleDrawable(ColorStateList.valueOf(theme.line),AppSheet.shape(fill,dp(radius)),AppSheet.shape(Color.WHITE,dp(radius)));
     }
     private void showFileActions(View anchor) {
-        android.widget.PopupMenu menu=theme.popup(this,anchor);
-        menu.getMenu().add(0,1,0,"Open in another app");
-        menu.getMenu().add(0,2,1,"Rename").setEnabled(!selectionBusy);
-        menu.getMenu().add(0,R.id.preview_delete,2,"Delete file").setEnabled(!selectionBusy);
-        menu.setOnMenuItemClickListener(item->{
-            if(item.getItemId()==1)openExternal();
-            else if(item.getItemId()==2)renameCurrent();
-            else deleteCurrent();
-            return true;
-        });
-        menu.show();
+        android.view.Menu menu=theme.popup(this,anchor).getMenu();
+        boolean toPane=availablePeerTarget(),hasPath=!path.isEmpty();
+        menu.add(0,3,0,"Share file");
+        menu.add(0,R.id.preview_copy,1,toPane?"Copy to other pane":"Copy file").setEnabled(hasPath&&!selectionBusy&&!viewerTransfer);
+        menu.add(0,R.id.preview_move,2,toPane?"Move to other pane":"Move file").setEnabled(hasPath&&!selectionBusy&&!viewerTransfer);
+        menu.add(0,5,3,"Properties");
+        if(ArchiveIntegrity.supports(name))
+            menu.add(0,ArchiveIntegrity.MENU_ID,4,"Test archive integrity").setEnabled(uri!=null||session!=null);
+        menu.add(0,R.id.preview_reveal,4,"Show in Anything Files").setVisible(session!=null).setEnabled(canReturnFile());
+        menu.add(0,1,5,"Open in another app").setVisible(kind!=Kind.OFFICE||shown==null||shown.office==null)
+                .setEnabled(uri!=null||session!=null);
+        menu.add(0,R.id.preview_minimize,6,"Minimize preview").setVisible(session!=null).setEnabled(canReturnFile());
+        menu.add(0,2,7,"Rename").setEnabled(hasPath&&!selectionBusy&&!viewerTransfer);
+        menu.add(0,R.id.preview_delete,8,"Delete file").setEnabled(hasPath&&!selectionBusy&&!viewerTransfer);
+        if(session!=null&&!session.selected.isEmpty())
+            menu.add(0,R.id.preview_delete_selected,9,"Delete selected").setEnabled(canDeleteSelected());
+        menu.add(0,R.id.preview_paste,9,"Paste into folder").setVisible(FileClipboard.count(this)>0);
+        menu.add(0,4,10,"Viewer guide");
+        FileEntry entry=currentEntry();
+        boolean localHex=session!=null&&!entry.directory&&path.startsWith("/")&&entry.pathEquals(path);
+        if(localHex)menu.add(0,R.id.preview_hex,11,HexInspectionSheet.LABEL);
+        previewActions.begin(new FileHoldActions.Target(anchor,entry,false,false,menu,label->{
+            int itemId=0;
+            for(int i=0;i<menu.size();i++){android.view.MenuItem item=menu.getItem(i);
+                if(item.isEnabled()&&item.isVisible()&&label.contentEquals(item.getTitle())){itemId=item.getItemId();break;}}
+            if(itemId==1)openExternal();
+            else if(itemId==2)renameCurrent();
+            else if(itemId==R.id.preview_reveal)revealFile();
+            else if(itemId==R.id.preview_minimize)minimize();
+            else if(itemId==R.id.preview_delete)deleteCurrent();
+            else if(itemId==R.id.preview_delete_selected)deleteSelectedFiles();
+            else if(itemId==3)sendCurrentFile(true);
+            else if(itemId==4)stage.post(this::showViewerGuide);
+            else if(itemId==5)showProperties();
+            else if(itemId==ArchiveIntegrity.MENU_ID)testArchiveIntegrity();
+            else if(itemId==R.id.preview_hex&&localHex)showHex(entry);
+            else if(itemId==R.id.preview_copy)fileMenuTransfer(false);
+            else if(itemId==R.id.preview_move)fileMenuTransfer(true);
+            else if(itemId==R.id.preview_paste){pasteAfterPreview=true;finish();}
+        }));
     }
-    private FileEntry currentEntry(){return session==null?new FileEntry(path,false,size,0):session.entries.get(session.position);}
-    private String folderLabel(){String parent=new java.io.File(path).getParent();return parent==null||parent.equals("/")?"Location":new java.io.File(parent).getName();}
+    private void showHex(FileEntry entry){
+        if(!entry.pathEquals(path))return;
+        if(activeSheet!=null)activeSheet.dismiss();
+        HexInspectionSheet inspect=new HexInspectionSheet(this,entry,actions,closed->{if(activeSheet==closed)activeSheet=null;});
+        activeSheet=inspect.dialog();inspect.show();
+    }
+    private void testArchiveIntegrity(){
+        if(!ArchiveIntegrity.supports(name)||uri==null&&session==null)return;
+        if(activeSheet!=null)activeSheet.dismiss();
+        activeSheet=ArchiveIntegrityDialog.open(this,actions,uri,path,session!=null&&session.root,
+                shown==null?null:shown.identity,name,sheet->{if(activeSheet==sheet)activeSheet=null;});
+    }
+    private void showProperties(){
+        if(activeSheet!=null)activeSheet.dismiss();
+        activeSheet=FileProperties.show(this,currentEntry(),path);
+    }
+    private boolean availablePeerTarget(){
+        if(otherPaneTarget==null||!canReturnFile()||"/".equals(otherPaneTarget))return false;
+        return !otherPaneTarget.equals(new java.io.File(path).getParent());
+    }
+    private void fileMenuTransfer(boolean move){
+        if(selectionBusy||viewerTransfer)return;
+        if(!availablePeerTarget()){prepareClipboard(move,true);return;}
+        FileEntry entry=currentEntry();String target=otherPaneTarget;boolean useRoot=session.root;
+        if(activeSheet!=null)activeSheet.dismiss();
+        AppSheet sheet=new AppSheet(this,move?"Move to other pane?":"Copy to other pane?");activeSheet=sheet;
+        sheet.content.addView(sheet.text(entry.name+"\n\nDestination\n"+target+"\n\nExisting files won’t be replaced.",14,INK));
+        sheet.action("Cancel",false,false,null);
+        sheet.action(move?"Move here":"Copy here",true,false,()->performPeerTransfer(entry,target,move,useRoot));sheet.show();
+    }
+    private void performPeerTransfer(FileEntry entry,String target,boolean move,boolean useRoot){
+        if(selectionBusy||viewerTransfer||FileOperationService.getState().running)return;
+        selectionBusy=true;updateFileControls();Context context=getApplicationContext();
+        try{actions.execute(()->{
+            try{
+                FileClipboard.Snapshot snapshot=FileClipboard.capture(context,java.util.Collections.singletonList(entry),move,useRoot);
+                ui.post(()->{
+                    selectionBusy=false;
+                    if(destroyed||isFinishing()||!started)return;
+                    viewerTransfer=true;viewerTransferSeen=false;viewerMove=move;updateFileControls();
+                    try{FileOperationService.transfer(this,target,snapshot);}
+                    catch(Exception failure){viewerTransfer=false;updateFileControls();showTransferNotice(failure.getMessage());}
+                });
+            }catch(Exception failure){ui.post(()->{
+                selectionBusy=false;
+                if(!destroyed&&!isFinishing()){updateFileControls();showTransferNotice(failure.getMessage());}
+            });}
+        });}catch(java.util.concurrent.RejectedExecutionException busy){
+            selectionBusy=false;updateFileControls();showTransferNotice("File access is busy.");
+        }
+    }
+    private void viewerTransferStatus(FileOperationService.State state){
+        if(!viewerTransfer||destroyed||isFinishing())return;
+        if(state.running){viewerTransferSeen=true;showTransferNotice(state.status);return;}
+        if(!viewerTransferSeen)return;
+        viewerTransfer=false;updateFileControls();
+        if(state.error!=null&&!state.error.isEmpty()){showTransferNotice(state.error);return;}
+        showTransferNotice(state.status);
+        if(viewerMove&&!state.cancelled&&state.completed>0){
+            Toast.makeText(this,"Moved to the other pane",Toast.LENGTH_SHORT).show();finish();
+        }
+    }
+    private void showTransferNotice(String message){
+        notice.setText(message==null?"The file operation could not be completed.":message);notice.setVisibility(View.VISIBLE);
+    }
+    private void showViewerGuide(){
+        if(destroyed||isFinishing()||!started)return;
+        stopViewerGuide();setFocusMode(false);
+        SpotlightTour.Step focus=new SpotlightTour.Step("Give the file more room","Focus mode hides the file controls. Back exits focus without closing the preview.",()->focusAction);
+        SpotlightTour.Step original=new SpotlightTour.Step("Find the original file","Tap the location for the full path. When opened from Files or Search, you can jump back to the file.",()->location);
+        SpotlightTour.Step more=new SpotlightTour.Step("More file actions","Tap these three dots for actions on the current file. For JPGs, the actions open in two columns with the current file's details.",()->moreAction);
+        ArrayList<SpotlightTour.Step> quick=new ArrayList<>();
+        ArrayList<SpotlightTour.Topic> topics=new ArrayList<>();
+        quick.add(focus);
+        boolean multiple=session!=null&&session.entries.size()>1;
+        SpotlightTour.Step neighbors=new SpotlightTour.Step("Browse neighboring files","Use the arrows or swipe across an unzoomed preview. When zoomed in, dragging pans the image instead.",()->fileNavigation);
+        if(multiple)quick.add(neighbors);
+        ArrayList<SpotlightTour.Step> format=new ArrayList<>();
+        if(controller instanceof PlaybackControls&&prepared){
+            controller.show(0);
+            format.add(new SpotlightTour.Step("Play and pause","Tap the preview to show the playback controls. Play, pause or skip 10 seconds at a time.",
+                    ()->controller instanceof PlaybackControls?((PlaybackControls)controller).playTarget():null));
+            format.add(new SpotlightTour.Step("Seek to a spot","Drag the timeline to move to a different point. The labels show elapsed time and duration.",()->findViewById(R.id.media_seek)));
+            format.add(new SpotlightTour.Step("Adjust playback","Use the speed and volume controls."+(kind==Kind.VIDEO?" The brightness control applies to this preview.":""),()->findViewById(R.id.media_speed)));
+        }else if(kind==Kind.PDF){
+            format.add(new SpotlightTour.Step("Change PDF pages","The arrows below the page go to the previous or next page. The page count is shown between them.",()->formatGuideTarget));
+            format.add(new SpotlightTour.Step("Read the fine print","Pinch or double-tap to zoom into the page, then drag to pan.",()->image));
+        }else if(image!=null){
+            format.add(new SpotlightTour.Step("Fit the image","The middle button resets zoom. Use − or +, pinch or double-tap to zoom, then drag to pan.",()->formatGuideTarget));
+            if(kind==Kind.SVG)format.add(new SpotlightTour.Step("Read the SVG source","Tap Source below the image to inspect its text. Tap Image to return.",()->viewerGuideControl(previewContent,"Source")));
+        }else if(kind==Kind.OFFICE&&textScroll!=null){
+            format.add(new SpotlightTour.Step("Read an Office summary","Read the document text, workbook values or slide text here. Use Open in another app for full formatting and editing.",()->formatGuideTarget));
+        }else if(textScroll!=null){
+            format.add(new SpotlightTour.Step("Read or copy text","Use A− and A+ to resize text. Select a passage or use Copy text to copy what is shown.",()->viewerGuideControl(previewContent,"Larger text")));
+            if(kind==Kind.HTML||kind==Kind.MARKDOWN||kind==Kind.SVG)
+                format.add(new SpotlightTour.Step("Switch between reading and source","When the file has a formatted view, switch to the source or return to the readable view.",()->viewerGuideControl(previewContent,kind==Kind.SVG?"Show SVG image":readerSource?"Read":"Source")));
+            if(kind==Kind.TEXT)format.add(new SpotlightTour.Step("Change syntax colors","Code colors are chosen by filename. Pick another language if a plain text file contains code.",()->previewContent==null?null:previewContent.findViewById(R.id.preview_syntax)));
+            format.add(new SpotlightTour.Step("Open the whole document","Large files may show only the first part here. Use More file actions → Open in another app for the full file.",()->moreAction));
+        }else if(archiveList!=null){
+            format.add(new SpotlightTour.Step("Browse the ZIP","Tap a supported entry to preview it without extracting the whole archive. Eligible entries can be shared separately.",()->archiveList));
+            if(canExtract()) format.add(new SpotlightTour.Step("Extract into a new folder",
+                    "Choose Extract all, then check the destination. Existing files are not replaced.",()->viewerGuideControl(previewContent,"Extract all…")));
+        }else if((kind==Kind.STREAM_ARCHIVE || kind==Kind.SEVEN_Z) && canExtract()){
+            format.add(new SpotlightTour.Step("Extract into a new folder",
+                    "Choose Extract all, then check the destination. Existing files are not replaced.",()->viewerGuideControl(previewContent,"Extract all…")));
+        }else if(kind==Kind.APK||kind==Kind.DEX){
+            if(canInstallApk())format.add(new SpotlightTour.Step("Install with Android",
+                    "Check the package name and version, then tap Install APK to review it in Android.",()->viewerGuideControl(previewContent,"Install APK")));
+            if(kind==Kind.APK)format.add(new SpotlightTour.Step("Browse package contents",
+                    "Search paths inside the APK and preview eligible text and images without extracting them.",
+                    ()->viewerGuideControl(previewContent,"Browse package contents")));
+            format.add(new SpotlightTour.Step("Inspect DEX classes",
+                    "Browse classes and read Smali without running or changing the file.",()->viewerGuideControl(previewContent,"Browse DEX classes")));
+        }else{
+            format.add(new SpotlightTour.Step("When a preview isn't available","Some formats need a different app. Use More file actions → Open in another app.",()->moreAction));
+        }
+        quick.add(format.get(0));quick.add(original);quick.add(more);
+        topics.add(new SpotlightTour.Topic("Controls for this file","The tools available in this preview.",format.toArray(new SpotlightTour.Step[0])));
+        topics.add(new SpotlightTour.Topic("Focus & navigation","Keep browsing without leaving the viewer.",
+                focus,multiple?neighbors:new SpotlightTour.Step("Open a file alongside its neighbors","Open a file from a folder or search result list to swipe through its neighbors when available.",()->location),original,
+                new SpotlightTour.Step("Pause and return later","From a Files or Search preview, choose Minimize preview. Resume from the bar in Anything without starting playback automatically.",()->moreAction)));
+        ArrayList<SpotlightTour.Step> actions=new ArrayList<>();
+        actions.add(more);
+        actions.add(new SpotlightTour.Step("Share or inspect the current file",kind==Kind.APK
+                ?"Use Share file or Properties. Opening the preview never starts Android’s installer."
+                :"Use Share file, Properties, or Open in another app. The guide doesn't send or edit any file.",()->moreAction));
+        actions.add(new SpotlightTour.Step("Copy, move, rename or delete","More file actions has a separate action for each. If a second pane is open, you can choose it as the destination.",()->moreAction));
+        if(multiple)actions.add(new SpotlightTour.Step("Select neighboring files","Use the selection control or hold the image. Choose other files before using the actions for the selection.",()->selectFile));
+        topics.add(new SpotlightTour.Topic("Preview file actions","Inspect, share or manage files from the viewer.",actions.toArray(new SpotlightTour.Step[0])));
+        viewerGuide=new SpotlightTour(this,()->{viewerGuide=null;if(started&&controller!=null)showController();},topics,null,quick.toArray(new SpotlightTour.Step[0]));
+        viewerGuide.start();
+    }
+    private View viewerGuideControl(View current,String label){
+        if(current==null)return null;
+        if(label.contentEquals(current.getContentDescription()==null?"":current.getContentDescription())
+                ||(current instanceof TextView&&label.contentEquals(((TextView)current).getText())))return current;
+        if(current instanceof ViewGroup){
+            ViewGroup group=(ViewGroup)current;
+            for(int i=0;i<group.getChildCount();i++){
+                View found=viewerGuideControl(group.getChildAt(i),label);if(found!=null)return found;
+            }
+        }
+        return null;
+    }
+    private void stopViewerGuide(){if(viewerGuide!=null){SpotlightTour tour=viewerGuide;viewerGuide=null;tour.close();}}
+    private boolean hasSelectedFiles(){return session!=null&&!session.selected.isEmpty();}
+    private FileEntry currentEntry(){return session==null?new FileEntry(path.isEmpty()?name:path,false,size,0):session.entries.get(session.position);}
     private void showPath(){if(activeSheet!=null)activeSheet.dismiss();activeSheet=new AppSheet(this,"File location");
         TextView full=activeSheet.text(path,14,INK);full.setTextIsSelectable(true);full.setLineSpacing(dp(4),1);activeSheet.content.addView(full);
-        activeSheet.action("Close",false,false,null);activeSheet.action("Copy path",true,false,()->{
+        if(canReturnFile())activeSheet.action("Show in Files",true,false,this::revealFile);
+        else activeSheet.action("Close",false,false,null);
+        activeSheet.action("Copy path",false,false,()->{
             getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("File path",path));haptic(location);});activeSheet.show();}
     private void haptic(View source){if(getSharedPreferences("ui",0).getBoolean("haptics",true))source.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK);}
     private void ensureSession(){if(session!=null)return;ArrayList<FileEntry> entries=new ArrayList<>();entries.add(currentEntry());session=PreviewSession.create(entries,path,false);getIntent().putExtra(PreviewSession.EXTRA,session.id);}
@@ -346,34 +616,90 @@ public final class FileViewerActivity extends Activity {
         boolean multiple=session!=null&&session.entries.size()>1;
         fileNavigation.setVisibility(multiple?View.VISIBLE:View.GONE);
         previousFile.setEnabled(multiple&&session.position>0);nextFile.setEnabled(multiple&&session.position+1<session.entries.size());
+        previousFile.setAlpha(previousFile.isEnabled()?1f:.38f);nextFile.setAlpha(nextFile.isEnabled()?1f:.38f);
         filePosition.setText(multiple?(session.position+1)+" / "+session.entries.size():"");
+        filePosition.setContentDescription(multiple?"File "+(session.position+1)+" of "+session.entries.size():null);
         boolean selected=session!=null&&session.selected.containsKey(path);selectFile.setImageResource(selected?R.drawable.ic_check:R.drawable.ic_select);
         selectFile.setContentDescription(selected?"Deselect file":"Select file");selectFile.setImageTintList(android.content.res.ColorStateList.valueOf(selected?ACCENT:INK));
         selectFile.setEnabled(!selectionBusy);copyFile.setEnabled(!selectionBusy);moveFile.setEnabled(!selectionBusy);
-        pasteFile.setVisibility(FileClipboard.count(this)>0?View.VISIBLE:View.GONE);selectionProgress.setVisibility(selectionBusy?View.VISIBLE:View.GONE);
-        selectedStrip.removeAllViews();int count=session==null?0:session.selected.size();selectedScroll.setVisibility(count>0?View.VISIBLE:View.GONE);
+        selectionProgress.setVisibility(selectionBusy?View.VISIBLE:View.GONE);
+        selectedStrip.removeAllViews();int count=session==null?0:session.selected.size();
+        selectedTray.setVisibility(count>0&&!focusMode?View.VISIBLE:View.GONE);
+        deleteSelected.setEnabled(canDeleteSelected());
+        deleteSelected.setContentDescription(deleteSelected.isEnabled()?"Delete selected files":"Selected files cannot be deleted from here");
+        deleteSelected.setAlpha(deleteSelected.isEnabled()?1f:.4f);
+        copyFile.setVisibility(count>0?View.VISIBLE:View.GONE);moveFile.setVisibility(count>0?View.VISIBLE:View.GONE);
         if(count>0){TextView label=text(Integer.toString(count),12,INK);label.setContentDescription(count+" selected files");label.setPadding(dp(4),0,dp(12),0);selectedStrip.addView(label,new LinearLayout.LayoutParams(-2,dp(44)));
             ArrayList<FileEntry> chosen=new ArrayList<>(session.selected.values());for(int i=Math.max(0,chosen.size()-24);i<chosen.size();i++){
                 FileEntry entry=chosen.get(i);ImageView mini=new ImageView(this);mini.setContentDescription("Selected "+entry.name);mini.setPadding(dp(2),dp(2),dp(2),dp(2));
-                thumbnails.bind(mini,entry,dp(44),session.root);selectedStrip.addView(mini,new LinearLayout.LayoutParams(dp(48),dp(44)));
+                thumbnails.bind(mini,entry,dp(44),session.root);selectedStrip.addView(mini,new LinearLayout.LayoutParams(dp(48),dp(48)));
                 mini.setOnClickListener(view->{for(int n=0;n<session.entries.size();n++)if(session.entries.get(n).path().equals(entry.path())){navigateTo(n);break;}});
-                mini.setOnLongClickListener(view->{session.selected.remove(entry.path());haptic(view);updateFileControls();return true;});}}
+                mini.setOnLongClickListener(view->{showPreviewSelection(view,entry);return true;});}}
     }
+    private void showPreviewSelection(View anchor,FileEntry held){
+        if(!hasSelectedFiles())return;
+        if(previewSelectionMenu!=null)previewSelectionMenu.dismiss();
+        int count=session.selected.size();
+        boolean ready=!selectionBusy&&!viewerTransfer;
+        android.view.Menu model=theme.popup(this,anchor).getMenu();
+        model.add("Copy").setIcon(R.drawable.ic_copy).setEnabled(ready);
+        model.add("Move").setIcon(R.drawable.ic_cut).setEnabled(ready);
+        model.add("Delete selected").setIcon(R.drawable.ic_delete).setEnabled(canDeleteSelected());
+        model.add("Deselect this file").setIcon(R.drawable.ic_close);
+        model.add("Clear selection").setIcon(R.drawable.ic_close);
+        MenuDialog next=new MenuDialog(this,theme,anchor,model,
+                count==1?"1 item selected":count+" items selected",2,choice->{
+            if(session==null||selectionBusy||viewerTransfer)return;
+            switch(choice){
+                case "Copy":prepareClipboard(false);break;
+                case "Move":prepareClipboard(true);break;
+                case "Delete selected":deleteSelectedFiles();break;
+                case "Deselect this file":session.selected.remove(held.path());updateFileControls();break;
+                case "Clear selection":session.selected.clear();updateFileControls();break;
+            }
+        });
+        previewSelectionMenu=next;
+        next.setOnDismissListener(menu->{if(previewSelectionMenu==next)previewSelectionMenu=null;});
+        next.show();
+    }
+
     private void navigate(int direction){if(session!=null)((PreviewStage)stage).goTo(session.position+direction);}
     private void navigateTo(int position){if(session==null||position<0||position>=session.entries.size()||position==session.position)return;
+        if(previewActions!=null)previewActions.stop();
+        if(previewSelectionMenu!=null)previewSelectionMenu.dismiss();
         rememberFile();cancelLoad();releaseMedia();clearShown();stateKey=null;restoreOnLoad=true;session.position=position;FileEntry entry=currentEntry();name=entry.name;path=entry.path();size=entry.size;uri=null;
-        readerSource=false;mime=mimeFor(name);kind=kindFor(name,mime);page=pageCount=mediaPosition=scrollY=archivePosition=archiveTop=0;zoom=1;centerX=centerY=.5f;mediaCompleted=false;playWhenReady=true;
-        title.setText(name);location.setTooltipText(folderLabel());details.setText(metadata());updateFileControls();load();}
-    private void renameCurrent(){if(selectionBusy)return;ensureSession();ArrayList<FileEntry> chosen=new ArrayList<>(session.selected.values());if(chosen.isEmpty())chosen.add(currentEntry());
+        readerSource=false;plainTextOverride=false;readerLanguage=null;mime=mimeFor(name);kind=kindFor(name,mime);page=pageCount=mediaPosition=scrollY=archivePosition=archiveTop=0;zoom=1;centerX=centerY=.5f;mediaCompleted=false;playWhenReady=true;
+        title.setText(name);details.setText(metadata());updateFileControls();load();}
+    private void renameCurrent(){if(selectionBusy||viewerTransfer)return;ensureSession();List<FileEntry> chosen=java.util.Collections.singletonList(currentEntry());
         activeSheet=FileRename.show(this,chosen,session.root,actions,this::finish);}
-    private void deleteCurrent(){if(selectionBusy)return;ensureSession();ArrayList<FileEntry> chosen=new ArrayList<>(session.selected.values());if(chosen.isEmpty())chosen.add(currentEntry());
+    private void deleteCurrent(){if(selectionBusy||viewerTransfer)return;ensureSession();List<FileEntry> chosen=java.util.Collections.singletonList(currentEntry());
         activeSheet=FileDeletion.confirm(this,chosen,session.root,actions,this::finish);}
-    private void prepareClipboard(boolean move){if(selectionBusy)return;ensureSession();ArrayList<FileEntry> chosen=new ArrayList<>(session.selected.values());
+    private boolean canDeleteSelected(){
+        if(session==null||session.selected.isEmpty()||selectionBusy||viewerTransfer)return false;
+        for(FileEntry entry:session.selected.values())if(!entry.path().startsWith("/"))return false;
+        return true;
+    }
+    private void deleteSelectedFiles(){
+        if(!canDeleteSelected())return;
+        List<FileEntry> chosen=new ArrayList<>(session.selected.values());
+        if(activeSheet!=null)activeSheet.dismiss();
+        activeSheet=FileDeletion.confirm(this,chosen,session.root,actions,()->{
+            session.selected.clear();finish();
+        },this::canDeleteSelected);
+    }
+    private void prepareClipboard(boolean move){prepareClipboard(move,false);}
+    private void prepareClipboard(boolean move,boolean currentOnly){if(selectionBusy||viewerTransfer)return;ensureSession();
+        ArrayList<FileEntry> chosen=currentOnly?new ArrayList<>():new ArrayList<>(session.selected.values());
         if(chosen.isEmpty())chosen.add(currentEntry());boolean root=session.root;selectionBusy=true;updateFileControls();Context context=getApplicationContext();
         try{actions.execute(()->{String error=null;try{FileClipboard.save(context,chosen,move,root);}catch(Exception failure){error=failure.getMessage();}String failure=error;
             ui.post(()->{if(destroyed||isFinishing())return;selectionBusy=false;updateFileControls();if(failure==null){haptic(copyFile);Toast.makeText(this,move?"Choose a destination to move":"Choose a destination to paste",Toast.LENGTH_SHORT).show();}
                 else Toast.makeText(this,failure,Toast.LENGTH_LONG).show();});});}catch(java.util.concurrent.RejectedExecutionException busy){selectionBusy=false;updateFileControls();}}
-    @Override public void finish(){Intent result=new Intent().putExtra("preview.paste",pasteAfterPreview);if(session!=null)result.putExtra(PreviewSession.EXTRA,session.id);setResult(RESULT_OK,result);super.finish();
+    @Override public void finish(){
+        Intent result=new Intent().putExtra("preview.paste",pasteAfterPreview);
+        if(session!=null)result.putExtra(PreviewSession.EXTRA,session.id);
+        if(minimizeResult!=null)result.putExtra(EXTRA_MINIMIZED,minimizeResult);
+        if(revealResult!=null)result.putExtra(EXTRA_REVEAL,revealResult);
+        setResult(RESULT_OK,result);super.finish();
         if(Build.VERSION.SDK_INT<34)overridePendingTransition(0,R.anim.preview_exit);}
 
     private final class PreviewStage extends FrameLayout {
@@ -387,7 +713,7 @@ public final class FileViewerActivity extends Activity {
         private final GestureDetector gestures;
         PreviewStage(){super(FileViewerActivity.this);setClipChildren(true);gestures=new GestureDetector(FileViewerActivity.this,new GestureDetector.SimpleOnGestureListener(){
             @Override public boolean onDown(MotionEvent event){return true;}
-            @Override public void onLongPress(MotionEvent event){if(!swiping&&!settling&&kind!=Kind.TEXT&&kind!=Kind.MARKDOWN&&kind!=Kind.HTML&&textScroll==null)selectCurrent();}});}
+            @Override public void onLongPress(MotionEvent event){if(!swiping&&!settling&&kind!=Kind.TEXT&&kind!=Kind.MARKDOWN&&kind!=Kind.HTML&&textScroll==null&&archiveList==null)selectCurrent();}});}
         @Override public boolean dispatchTouchEvent(MotionEvent event){
             if(event.getActionMasked()==MotionEvent.ACTION_DOWN){
                 if(velocity!=null)velocity.recycle();velocity=android.view.VelocityTracker.obtain();
@@ -434,7 +760,7 @@ public final class FileViewerActivity extends Activity {
                 ImageView picture=new ImageView(FileViewerActivity.this);
                 boolean visual=nextKind==Kind.IMAGE||nextKind==Kind.SVG||nextKind==Kind.VIDEO||nextKind==Kind.PDF;
                 if(visual)thumbnails.bindPreview(picture,entry,Math.min(getWidth(),dp(512)),session.root);
-                else{picture.setImageResource(FileTypes.ICONS[FileTypes.category(entry)]);picture.setImageTintList(android.content.res.ColorStateList.valueOf(nextKind==Kind.AUDIO?ACCENT:UiTheme.fileColor(FileViewerActivity.this,FileTypes.category(entry))));}
+                else{int type=FileTypes.category(entry);picture.setImageResource(UiTheme.fileIcon(FileViewerActivity.this,entry));picture.setImageTintList(UiTheme.fileTint(FileViewerActivity.this,type));}
                 FrameLayout.LayoutParams pictureLayout=visual?new FrameLayout.LayoutParams(-1,-1):new FrameLayout.LayoutParams(dp(64),dp(64),Gravity.CENTER);
                 if(nextKind==Kind.PDF||nextKind==Kind.SVG||nextKind==Kind.IMAGE){
                     int inset=nextKind==Kind.PDF?dp(16):dp(8);
@@ -508,7 +834,7 @@ public final class FileViewerActivity extends Activity {
 
     private void load() {
         if (!started || destroyed || isFinishing()) return;
-        cancelLoad(); clearShown(); image = null; textScroll = null; archiveList = null;
+        cancelLoad(); clearShown(); image=null;textScroll=null;archiveList=null;formatGuideTarget=null;mediaLoading=null;
         notice.setVisibility(View.GONE);((PreviewStage)stage).reset();stage.removeAllViews();
         stage.setBackgroundColor(stageColor(kind));
         previewContent=new PreviewContent(this);stage.addView(previewContent,new FrameLayout.LayoutParams(-1,-1));
@@ -517,12 +843,13 @@ public final class FileViewerActivity extends Activity {
         }
         View placeholder=navigationPlaceholder;navigationPlaceholder=null;
         loadingPlaceholder=placeholder;
-        previewContent.addView(placeholder==null?new LoadingSkeleton(this,LoadingSkeleton.PREVIEW):placeholder,new FrameLayout.LayoutParams(-1,-1));
+        if(placeholder!=null)previewContent.addView(placeholder,new FrameLayout.LayoutParams(-1,-1));
+        else addLoadingIndicator(previewContent,kind==Kind.PDF?"Opening page "+(page+1):"Opening preview");
         job = new PreviewJob(this, getApplicationContext(), uri, kind, page, generation);
         job.restoreState=restoreOnLoad;restoreOnLoad=false;
         if(uri==null&&session!=null){job.entry=currentEntry();job.allowRoot=session.root;}
         try { pending = PREVIEWS.submit(job); }
-        catch (java.util.concurrent.RejectedExecutionException busy) { job.cancel(); job = null; failure("Another preview is finishing. Reopen this file in a moment."); }
+        catch (java.util.concurrent.RejectedExecutionException busy) { job.cancel(); job = null; failure("Another preview is finishing.",true); }
     }
 
     private void cancelLoad() {
@@ -536,6 +863,7 @@ public final class FileViewerActivity extends Activity {
         if (!started || destroyed || isFinishing() || isDestroyed() || generation != expectedGeneration) { result.close(); return; }
         pending = null; job = null;
         if(result.uri!=null)uri=result.uri;
+        if(result.transportStream){kind=Kind.VIDEO;stage.setBackgroundColor(stageColor(kind));}
         if (result.error != null) { String error = result.error; result.close(); failure(error); return; }
         shown = result;
         stateKey=result.key;
@@ -544,9 +872,18 @@ public final class FileViewerActivity extends Activity {
         details.setText(metadata());View cover=loadingPlaceholder;loadingPlaceholder=null;previewContent.removeAllViews();
         if (kind == Kind.IMAGE || kind == Kind.PDF || kind==Kind.SVG&&!readerSource) showImage(result);
         else if (kind == Kind.TEXT || kind==Kind.MARKDOWN || kind==Kind.HTML || kind==Kind.SVG) showDocument(result);
+        else if (kind == Kind.OFFICE) showOffice(result.office);
         else if (kind == Kind.ZIP) showArchive(result.archive);
+        else if (kind == Kind.STREAM_ARCHIVE) showStreamArchive(StreamArchiveExtraction.format(name),result.tar);
+        else if (kind == Kind.SEVEN_Z) showSevenZip(result.sevenZip);
+        else if (kind == Kind.APK) showApk(result.apk);
+        else if (kind == Kind.DEX) showDexEntry();
         else showMedia(result);
-        if(cover!=null&&shown==result)previewContent.coverWith(cover,kind==Kind.VIDEO);
+        if(cover!=null&&shown==result){
+            PreviewContent current=previewContent;boolean waitsForFrame=kind==Kind.VIDEO&&playWhenReady;
+            current.coverWith(cover,waitsForFrame);
+            if(waitsForFrame)ui.postDelayed(()->{if(previewContent==current)current.reveal();},2400);
+        }
     }
 
     private void showImage(PreviewResult result) {
@@ -562,20 +899,24 @@ public final class FileViewerActivity extends Activity {
         if (kind == Kind.PDF) {
             page = result.page; pageCount = result.pageCount;
             image.enablePageEdge(()->pageCount,p->{if(p!=page)changePage(p);});
-            LinearLayout navigation = row();
-            Button previous = button("Previous"); previous.setEnabled(page > 0); previous.setOnClickListener(view -> changePage(page - 1));
-            navigation.addView(previous, new LinearLayout.LayoutParams(dp(84), dp(48)));
-            TextView position = text((page + 1) + " / " + pageCount, 13, INK); position.setGravity(Gravity.CENTER);
-            position.setContentDescription("Page " + (page + 1) + " of " + pageCount); navigation.addView(position, new LinearLayout.LayoutParams(dp(68), dp(48)));
-            Button next = button("Next"); next.setEnabled(page + 1 < pageCount); next.setOnClickListener(view -> changePage(page + 1));
-            navigation.addView(next, new LinearLayout.LayoutParams(dp(72), dp(48)));
-            addViewerTools(column,navigation);
+            LinearLayout navigation=row();
+            ImageButton previous=actionIcon(R.drawable.ic_viewer_previous,"Previous page",View.NO_ID);
+            previous.setEnabled(page>0);previous.setAlpha(page>0?1f:.38f);
+            previous.setOnClickListener(view->changePage(page-1));navigation.addView(previous);
+            TextView position=text((page+1)+" / "+pageCount,12,INK);position.setGravity(Gravity.CENTER);
+            position.setContentDescription("Page "+(page+1)+" of "+pageCount);
+            navigation.addView(position,new LinearLayout.LayoutParams(dp(60),dp(48)));
+            ImageButton next=actionIcon(R.drawable.ic_viewer_next,"Next page",View.NO_ID);
+            next.setEnabled(page+1<pageCount);next.setAlpha(page+1<pageCount?1f:.38f);
+            next.setOnClickListener(view->changePage(page+1));navigation.addView(next);
+            formatGuideTarget=navigation;addViewerTools(column,navigation);
             details.setText(metadata() + " · " + pageCount + (pageCount == 1 ? " page" : " pages"));
         } else {
             LinearLayout tools=row();
-            Button less=button("−");less.setContentDescription("Zoom out");less.setOnClickListener(v->image.zoomBy(.8f));tools.addView(less,new LinearLayout.LayoutParams(dp(48),dp(48)));
-            Button fit=button("Fit");fit.setContentDescription("Fit image");fit.setOnClickListener(v->image.fit());tools.addView(fit,new LinearLayout.LayoutParams(dp(52),dp(48)));
-            Button more=button("+");more.setContentDescription("Zoom in");more.setOnClickListener(v->image.zoomBy(1.25f));tools.addView(more,new LinearLayout.LayoutParams(dp(48),dp(48)));
+            ImageButton less=actionIcon(R.drawable.ic_viewer_zoom_out,"Zoom out",View.NO_ID);less.setOnClickListener(v->image.zoomBy(.8f));tools.addView(less);
+            ImageButton fit=actionIcon(R.drawable.ic_viewer_fit,"Fit image",View.NO_ID);fit.setOnClickListener(v->image.fit());tools.addView(fit);
+            ImageButton more=actionIcon(R.drawable.ic_viewer_zoom_in,"Zoom in",View.NO_ID);more.setOnClickListener(v->image.zoomBy(1.25f));tools.addView(more);
+            formatGuideTarget=fit;
             if(kind==Kind.SVG){
                 Button source=button("Source");source.setOnClickListener(v->{rememberView();readerSource=true;previewContent.removeAllViews();image=null;showDocument(result);});
                 tools.addView(source,new LinearLayout.LayoutParams(dp(76),dp(48)));
@@ -588,7 +929,7 @@ public final class FileViewerActivity extends Activity {
     }
 
     private void addViewerTools(LinearLayout column, LinearLayout tools) {
-        tools.setBackground(panel(theme.surface,24));
+        tools.setBackground(panel(theme.surface,14));
         LinearLayout.LayoutParams layout=new LinearLayout.LayoutParams(-2,-2);
         layout.gravity=Gravity.CENTER_HORIZONTAL;
         layout.setMargins(0,dp(4),0,dp(10));column.addView(tools,layout);
@@ -599,35 +940,130 @@ public final class FileViewerActivity extends Activity {
         page = value; zoom = 1; centerX = centerY = .5f; load();
     }
 
+    private void showOffice(OfficePreview.Result office) {
+        LinearLayout column = new LinearLayout(this); column.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout sections=new LinearLayout(this); sections.setOrientation(LinearLayout.VERTICAL);
+        sections.setPadding(dp(18),dp(12),dp(18),dp(24));
+        String caveat=office.format==OfficePreview.Format.SHEET
+                ?"Visible worksheets only. Up to 40 rows and columns A–L per sheet. Dates can appear as numbers. Formulas show saved values only."
+                :office.format==OfficePreview.Format.SLIDES
+                    ?"Reads text in presentation order. Images, layout and speaker notes aren't shown."
+                    :"Reads the main document text and simple table rows. Images and page layout aren't shown.";
+        TextView mode=text("Read-only preview",13,MUTED);
+        mode.setPadding(0,dp(4),0,dp(4));sections.addView(mode);
+        TextView caption=text(caveat,12,MUTED);
+        caption.setPadding(0,dp(3),0,dp(10)); sections.addView(caption);
+        for(OfficePreview.Section section:office.sections){
+            TextView title=text(section.title,15,INK);
+            title.setTypeface(getResources().getFont(R.font.inter_semibold)); title.setPadding(0,dp(13),0,dp(5));
+            if(Build.VERSION.SDK_INT>=28)title.setAccessibilityHeading(true);
+            sections.addView(title);
+            TextView content=text(section.text,office.format==OfficePreview.Format.SHEET?13:15,INK);
+            if(office.format==OfficePreview.Format.SHEET)content.setTypeface(android.graphics.Typeface.MONOSPACE);
+            content.setTextIsSelectable(true); content.setLineSpacing(dp(4),1.05f); simpleTextLayout(content);
+            sections.addView(content);
+        }
+        textScroll=new EdgeFastScroll.Document(this); textScroll.setFillViewport(true);
+        textScroll.addView(sections,new ScrollView.LayoutParams(-1,-2));
+        column.addView(textScroll,new LinearLayout.LayoutParams(-1,0,1));
+        column.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
+        LinearLayout dock=row();dock.setGravity(Gravity.CENTER_VERTICAL|Gravity.END);
+        dock.setBackgroundColor(CHROME);dock.setPadding(dp(16),dp(6),dp(16),dp(6));
+        Button open=button("Open in another app");open.setPadding(dp(16),0,dp(16),0);
+        open.setTextColor(theme.dark?theme.surface:Color.WHITE);open.setBackground(controlBackground(ACCENT,14));
+        open.setOnClickListener(v->openExternal());formatGuideTarget=open;
+        dock.addView(open,new LinearLayout.LayoutParams(-2,dp(48)));
+        column.addView(dock,new LinearLayout.LayoutParams(-1,-2));
+        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+        details.setText(metadata()+" · "+office.format.label);
+        if(office.limited)note("This is a partial summary. Use Open in another app for the full file.");
+        textScroll.addOnLayoutChangeListener(new RestoreScroll(scrollY));
+    }
+
     private void showDocument(PreviewResult preview) {
+        formatGuideTarget=null;
         PreviewText.Result result=preview.text;LinearLayout column=new LinearLayout(this);column.setOrientation(LinearLayout.VERTICAL);
         LinearLayout tools=row();tools.setBackground(panel(CHROME,16));tools.setPadding(dp(12),0,dp(4),0);
-        TextView content=text("",readerSize,INK);content.setGravity(Gravity.TOP);content.setPadding(dp(20),dp(16),dp(20),dp(28));content.setLineSpacing(dp(4),1.12f);
+        TextView content=text("",readerSize,INK);content.setGravity(Gravity.TOP);content.setPadding(dp(14),dp(14),dp(16),dp(24));
         content.setTextIsSelectable(true);content.setLinkTextColor(ACCENT);simpleTextLayout(content);
-        Runnable bind=()->{boolean rich=!readerSource&&preview.formatted!=null;
-            content.setText(rich?preview.formatted:result.text.isEmpty()?"This file is empty.":result.text);
-            if(rich)content.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());};bind.run();
+        Button syntax=button("");syntax.setId(R.id.preview_syntax);syntax.setSingleLine(true);syntax.setEllipsize(TextUtils.TruncateAt.END);
+        syntax.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);syntax.setPadding(dp(14),0,dp(14),0);
+        syntax.setOnClickListener(v->chooseReaderLanguage(syntax,preview));
+        Runnable bind=()->{
+            boolean rich=!readerSource&&preview.formatted!=null;
+            syntax.setVisibility(rich||preview.code==null||result.text.isEmpty()?View.GONE:View.VISIBLE);
+            if(rich){
+                content.setTypeface(getResources().getFont(R.font.inter));content.setLineSpacing(dp(4),1.12f);
+                content.setText(preview.formatted);
+                content.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
+            }else{
+                // Selectable movement must be reinstalled when changing back from a rich document.
+                content.setMovementMethod(android.text.method.ArrowKeyMovementMethod.getInstance());
+                CodeSyntax.Model code=preview.code;
+                if(code==null){content.setText(result.text.isEmpty()?"This file is empty.":result.text);return;}
+                syntax.setText("Syntax: "+code.language.label+(readerLanguage==null?" · Auto":""));
+                syntax.setContentDescription("Syntax highlighting: "+code.language.label+(readerLanguage==null?", automatic":""));
+                boolean plain=code.language==CodeSyntax.Language.PLAIN;
+                content.setTypeface(kind==Kind.TEXT&&plain?getResources().getFont(R.font.inter):android.graphics.Typeface.MONOSPACE);
+                content.setLineSpacing(dp(3),1.08f);
+                int gutter=Math.max(dp(32),Math.round(content.getPaint().measureText("0000")*.8f)+dp(20));
+                int tab=Math.round(content.getPaint().measureText("    "));
+                content.setText(CodePreviewStyle.style(code,theme.dark,MUTED,gutter,dp(10),Math.max(1,tab)));
+            }
+            if(result.truncated)note("Showing the first 128 KiB or 2,000 lines. Use Open for the full file.");
+            else if(!rich&&preview.code!=null&&preview.code.limited)note("Syntax colors are limited for dense files. All preview text is visible.");
+            else notice.setVisibility(View.GONE);
+        };bind.run();
         if(preview.formatted!=null||kind==Kind.SVG){Button mode=button(kind==Kind.SVG?"Image":readerSource?"Read":"Source");
             mode.setContentDescription(kind==Kind.SVG?"Show SVG image":readerSource?"Show formatted document":"Show source text");
             mode.setOnClickListener(v->{if(kind==Kind.SVG){readerSource=false;previewContent.removeAllViews();textScroll=null;showImage(preview);}
-                else{readerSource=!readerSource;bind.run();mode.setText(readerSource?"Read":"Source");}});
+                else{readerSource=!readerSource;bind.run();mode.setText(readerSource?"Read":"Source");
+                    mode.setContentDescription(readerSource?"Show formatted document":"Show source text");}});
             tools.addView(mode,new LinearLayout.LayoutParams(0,dp(48),1));}
         else tools.addView(text(result.encoding,12,MUTED),new LinearLayout.LayoutParams(0,dp(48),1));
         Button smaller=button("A−"),larger=button("A+");smaller.setContentDescription("Smaller text");larger.setContentDescription("Larger text");
-        smaller.setOnClickListener(v->resizeReader(content,-2));larger.setOnClickListener(v->resizeReader(content,2));
+        smaller.setOnClickListener(v->{resizeReader(content,-2);bind.run();});larger.setOnClickListener(v->{resizeReader(content,2);bind.run();});
         tools.addView(smaller,new LinearLayout.LayoutParams(dp(48),dp(48)));tools.addView(larger,new LinearLayout.LayoutParams(dp(48),dp(48)));
-        ImageButton copy=actionIcon(R.drawable.ic_copy,"Copy text",View.generateViewId());copy.setOnClickListener(v->getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText(name,content.getText())));tools.addView(copy);
+        ImageButton copy=actionIcon(R.drawable.ic_copy,"Copy text",View.generateViewId());copy.setOnClickListener(v->{
+            CharSequence copied=!readerSource&&preview.formatted!=null?preview.formatted:result.text;
+            getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText(name,copied));
+        });tools.addView(copy);
         LinearLayout.LayoutParams toolsLayout=new LinearLayout.LayoutParams(-1,-2);
         toolsLayout.setMargins(dp(10),dp(10),dp(10),0);column.addView(tools,toolsLayout);
+        LinearLayout.LayoutParams syntaxLayout=new LinearLayout.LayoutParams(-2,dp(48));
+        syntaxLayout.setMargins(dp(10),0,dp(10),0);column.addView(syntax,syntaxLayout);
         textScroll=new EdgeFastScroll.Document(this);textScroll.setFillViewport(true);textScroll.addView(content,new ScrollView.LayoutParams(-1,-2));
         column.addView(textScroll,new LinearLayout.LayoutParams(-1,0,1));previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
-        details.setText(metadata());if(result.truncated)note("Showing the first 128 KiB or 2,000 lines. Use Open for the full file.");
+        details.setText(metadata());
         textScroll.addOnLayoutChangeListener(new RestoreScroll(scrollY));
+    }
+
+    private void chooseReaderLanguage(View anchor,PreviewResult preview) {
+        if(languageMenu!=null)languageMenu.dismiss();
+        android.view.Menu menu=theme.popup(this,anchor).getMenu();
+        menu.add(1,1,0,"Automatic ("+CodeSyntax.detect(name,preview.code.display).label+")");
+        for(CodeSyntax.Language language:CodeSyntax.Language.values())
+            menu.add(1,language.ordinal()+2,language.ordinal()+1,language.label);
+        menu.setGroupCheckable(1,true,true);
+        menu.findItem(readerLanguage==null?1:readerLanguage.ordinal()+2).setChecked(true);
+        MenuDialog choices=new MenuDialog(this,theme,anchor,menu,"Syntax",label->{
+            if(shown!=preview)return;
+            for(int i=0;i<menu.size();i++){
+                android.view.MenuItem item=menu.getItem(i);
+                if(!label.contentEquals(item.getTitle()))continue;
+                CodeSyntax.Language chosen=item.getItemId()==1?null:CodeSyntax.Language.values()[item.getItemId()-2];
+                if(chosen!=readerLanguage){rememberView();readerLanguage=chosen;load();}
+                break;
+            }
+        });
+        languageMenu=choices;
+        choices.setOnDismissListener(dialog->{if(languageMenu==choices)languageMenu=null;});
+        choices.show();
     }
     private void resizeReader(TextView content,int delta){readerSize=Math.max(12,Math.min(26,readerSize+delta));content.setTextSize(readerSize);getSharedPreferences("ui",0).edit().putInt("readerSize",readerSize).apply();}
 
     @SuppressLint("WrongConstant")
-    private static void simpleTextLayout(TextView text) {
+    static void simpleTextLayout(TextView text) {
         // Layout's API 23 constant has the same value as the API 29 LineBreaker
         // constant used by SDK 36's annotation. Keep this call valid on API 26.
         text.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_SIMPLE);
@@ -640,19 +1076,633 @@ public final class FileViewerActivity extends Activity {
         }
     }
 
-    private void showArchive(ZipDirectory.Listing result) {
-        if (result.entries.isEmpty() && !result.truncated) {
-            TextView empty = text("This archive is empty.", 14, MUTED); empty.setGravity(Gravity.CENTER); previewContent.addView(empty, new FrameLayout.LayoutParams(-1, -1));
+    private boolean canInstallApk() {
+        return kind == Kind.APK && shown != null && shown.apk != null
+                && ApkInstallAction.supported() && shown.apk.canInstall();
+    }
+
+    private void installApk() {
+        if (canInstallApk()) shown.apk.install(this);
+    }
+
+    private void showApk(ApkInstallAction.Details apk) {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(20),dp(12),dp(20),dp(16));
+        TextView label = text(apk.label,20,INK);
+        label.setTypeface(getResources().getFont(R.font.inter_semibold));
+        body.addView(label,new LinearLayout.LayoutParams(-1,-2));
+        TextView metadata = text(apk.packageName + "\nVersion " + apk.version + "\nMinimum Android API "
+                + apk.minSdk + " · Targets API " + apk.targetSdk,14,MUTED);
+        metadata.setPadding(0,dp(8),0,dp(12));
+        metadata.setTextIsSelectable(true);
+        body.addView(metadata,new LinearLayout.LayoutParams(-1,-2));
+        boolean installable = canInstallApk();
+        if (installable) {
+            body.addView(text("Android reviews the installation. Only install APKs from sources you trust.",13,MUTED));
         } else {
-            archiveList = new EdgeFastScroll.List(this); ((EdgeFastScroll.List)archiveList).labels=p->result.entries.get(p).name; archiveList.setPadding(dp(12),dp(8),dp(12),dp(8));
+            String reason = apk.installUnavailableReason();
+            if (reason != null) body.addView(text(reason,13,MUTED));
+        }
+        addPreviewAction(body,"Inspect APK",()->{
+            if(shown==null||shown.apk!=apk||kind!=Kind.APK)return;
+            if(activeSheet!=null)activeSheet.dismiss();
+            AppSheet inspection=ApkInspectionSheet.create(this,apk,actions,closed->{if(activeSheet==closed)activeSheet=null;});
+            activeSheet=inspection;inspection.show();
+        });
+        addPreviewAction(body,"Browse package contents",()->{
+            if(shown!=null&&shown.apk==apk&&kind==Kind.APK)showApkContents(apk);
+        });
+        addPreviewAction(body,"Browse DEX classes",this::browseDex);
+        scroll.addView(body,new ScrollView.LayoutParams(-1,-2));
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        if (installable) {
+            column.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
+            LinearLayout actions=row();
+            actions.setGravity(Gravity.CENTER_VERTICAL|Gravity.END);
+            actions.setBackgroundColor(CHROME);
+            actions.setPadding(dp(16),dp(6),dp(16),dp(6));
+            Button install=button("Install APK");
+            install.setTextColor(theme.dark?theme.surface:Color.WHITE);
+            install.setBackground(controlBackground(ACCENT,14));
+            install.setPadding(dp(18),0,dp(18),0);
+            install.setOnClickListener(v->installApk());
+            actions.addView(install,new LinearLayout.LayoutParams(-2,dp(48)));
+            column.addView(actions,new LinearLayout.LayoutParams(-1,-2));
+        }
+        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private void showApkContents(ApkInstallAction.Details apk) {
+        if(activeSheet!=null)activeSheet.dismiss();
+        ApkContents panel=new ApkContents(apk);
+        activeSheet=panel.sheet;
+        panel.show();
+    }
+
+    private final class ApkContents {
+        final ApkInstallAction.Details apk;
+        final AppSheet sheet;
+        final LinearLayout listingPanel, detailPanel;
+        final TextView count;
+        final android.widget.EditText filter;
+        final EdgeFastScroll.List list;
+        List<ZipDirectory.Entry> shownEntries=new ArrayList<>();
+        ZipDirectory.Listing listing;
+        Future<?> pending;
+        private volatile java.util.Map.Entry<ZipDirectory.Entry,ApkResources.Table> verifiedResourceTable;
+        private volatile ApkResources.Table xmlResourceNames;
+        private volatile boolean xmlResourceTableTried;
+        int request;
+        boolean inDetail;
+
+        ApkContents(ApkInstallAction.Details apk) {
+            this.apk=apk;
+            sheet=new AppSheet(FileViewerActivity.this,"APK contents",true);
+            listingPanel=new LinearLayout(FileViewerActivity.this);
+            listingPanel.setOrientation(LinearLayout.VERTICAL);
+            detailPanel=new LinearLayout(FileViewerActivity.this);
+            detailPanel.setOrientation(LinearLayout.VERTICAL);
+            detailPanel.setVisibility(View.GONE);
+            sheet.content.addView(listingPanel,new LinearLayout.LayoutParams(-1,0,1));
+            sheet.content.addView(detailPanel,new LinearLayout.LayoutParams(-1,0,1));
+            filter=new android.widget.EditText(FileViewerActivity.this);
+            filter.setSingleLine(true);
+            filter.setHint("Filter package paths");
+            filter.setContentDescription("Filter package paths");
+            filter.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(200)});
+            filter.setMinHeight(dp(48));
+            filter.setTextSize(14);
+            filter.setEnabled(false);
+            filter.addTextChangedListener(new android.text.TextWatcher(){
+                @Override public void beforeTextChanged(CharSequence text,int start,int count,int after){}
+                @Override public void onTextChanged(CharSequence text,int start,int before,int count){ applyFilter(); }
+                @Override public void afterTextChanged(android.text.Editable editable){}
+            });
+            listingPanel.addView(filter,new LinearLayout.LayoutParams(-1,-2));
+            count=sheet.text("Reading package directory…",13,MUTED);
+            count.setPadding(dp(4),dp(8),dp(4),dp(8));
+            count.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            listingPanel.addView(count,new LinearLayout.LayoutParams(-1,-2));
+            list=new EdgeFastScroll.List(FileViewerActivity.this);list.enableReleasePick();
+            list.setDivider(new android.graphics.drawable.ColorDrawable(theme.line));
+            list.setDividerHeight(dp(1));
+            list.labels=p->p>=0&&p<shownEntries.size()?shownEntries.get(p).name:"";
+            list.setOnItemClickListener((p,v,i,id)->{if(i>=0&&i<shownEntries.size())showEntry(shownEntries.get(i));});
+            listingPanel.addView(list,new LinearLayout.LayoutParams(-1,0,1));
+            sheet.setBackNavigation(this::backToContents);
+            sheet.setOnDismissListener(dialog->{
+                cancel();
+                clearDetail();
+                if(activeSheet==sheet)activeSheet=null;
+            });
+        }
+
+        void show() {
+            listingPanel.setFocusableInTouchMode(true);
+            listingPanel.requestFocus();
+            sheet.show();
+            sheet.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+                    | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+            int ticket=++request;
+            try {
+                pending=PREVIEWS.submit(()->{
+                    ZipDirectory.Listing contents=null;
+                    String error=null;
+                    try (ParcelFileDescriptor.AutoCloseInputStream input=
+                                 new ParcelFileDescriptor.AutoCloseInputStream(apk.openContents())) {
+                        contents=ZipDirectory.read(input.getChannel());
+                    } catch (Exception | OutOfMemoryError failure) {
+                        error="This package directory couldn’t be listed. Reopen the APK to try again.";
+                    }
+                    ZipDirectory.Listing result=contents;String message=error;
+                    ui.post(()->{
+                        if(!isCurrentSheet(sheet)||ticket!=request)return;
+                        if(result==null){count.setText(message);return;}
+                        listing=result;
+                        filter.setEnabled(true);
+                        applyFilter();
+                    });
+                });
+            } catch(java.util.concurrent.RejectedExecutionException busy) {
+                count.setText("The viewer is busy. Reopen package contents to retry.");
+            }
+        }
+
+        private void applyFilter() {
+            if(listing==null)return;
+            String term=filter.getText().toString().trim().toLowerCase(Locale.ROOT);
+            List<ZipDirectory.Entry> filtered=new ArrayList<>();
+            for(ZipDirectory.Entry entry:listing.entries) {
+                if(term.isEmpty()||entry.name.toLowerCase(Locale.ROOT).contains(term))filtered.add(entry);
+            }
+            shownEntries=filtered;
+            list.setAdapter(new ArchiveAdapter(filtered,true));
+            String found=NumberFormat.getIntegerInstance().format(filtered.size());
+            String total=NumberFormat.getIntegerInstance().format(listing.totalEntries);
+            if(listing.truncated)
+                count.setText("Showing "+found+" match(es) in the first "+listing.entries.size()+" of "+total+" package entries.");
+            else if(term.isEmpty()) count.setText(total+(listing.totalEntries==1?" package entry":" package entries"));
+            else count.setText(found+(filtered.size()==1?" match":" matches")+" · "+total+" entries");
+        }
+
+        private void showEntry(ZipDirectory.Entry entry) {
+            if(inDetail||!isCurrentSheet(sheet))return;
+            cancel();
+            inDetail=true;
+            android.view.inputmethod.InputMethodManager ime=getSystemService(android.view.inputmethod.InputMethodManager.class);
+            if(ime!=null)ime.hideSoftInputFromWindow(filter.getWindowToken(),0);
+            filter.clearFocus();
+            listingPanel.setVisibility(View.GONE);
+            detailPanel.setVisibility(View.VISIBLE);
+            ScrollView scroller=new EdgeFastScroll.Document(FileViewerActivity.this);
+            scroller.setFillViewport(false);
+            LinearLayout body=new LinearLayout(FileViewerActivity.this);
+            body.setOrientation(LinearLayout.VERTICAL);
+            body.setPadding(dp(10),dp(6),dp(10),dp(12));
+            TextView label=sheet.text(entry.name,16,INK);
+            label.setTextIsSelectable(true);
+            label.setTypeface(getResources().getFont(R.font.inter_semibold));
+            body.addView(label,new LinearLayout.LayoutParams(-1,-2));
+            TextView info=sheet.text(ApkPackageContents.type(entry)+(entry.directory?"":" · "+bytes(entry.size)),13,MUTED);
+            info.setPadding(0,dp(6),0,dp(12));
+            body.addView(info,new LinearLayout.LayoutParams(-1,-2));
+            TextView status=sheet.text("",14,INK);
+            status.setTextIsSelectable(true);
+            simpleTextLayout(status);
+            body.addView(status,new LinearLayout.LayoutParams(-1,-2));
+            scroller.addView(body,new ScrollView.LayoutParams(-1,-2));
+            detailPanel.addView(scroller,new LinearLayout.LayoutParams(-1,0,1));
+            Button back=button("Back to package contents");
+            back.setOnClickListener(v->backToContents());
+            detailPanel.addView(back,new LinearLayout.LayoutParams(-1,dp(48)));
+            ApkPackageContents.Format format=ApkPackageContents.format(entry);
+            if(format==ApkPackageContents.Format.NONE) {
+                status.setText(ZipDirectory.isDexEntry(entry.name)
+                        ?"Go back to the APK and use Browse DEX classes."
+                        :"Only the name and type are available for this entry.");
+                return;
+            }
+            status.setText("Loading read-only preview…");
+            if(format==ApkPackageContents.Format.XML||format==ApkPackageContents.Format.RESOURCE_TABLE)
+                status.setTypeface(android.graphics.Typeface.MONOSPACE);
+            int ticket=++request;
+            try {
+                pending=PREVIEWS.submit(()->{
+                    Object rendered=null;String error=null;
+                    try (ParcelFileDescriptor.AutoCloseInputStream input=
+                                 new ParcelFileDescriptor.AutoCloseInputStream(apk.openContents())) {
+                        java.nio.channels.FileChannel channel=input.getChannel();
+                        if(format==ApkPackageContents.Format.RESOURCE_TABLE){
+                            rendered=readResourceTable(channel,entry).describe();
+                        }else{
+                            byte[] data=ApkPackageContents.readVerified(channel,entry,format);
+                            if(format==ApkPackageContents.Format.XML){
+                                ApkResources.Table table=ApkBinaryXml.looksLike(data)?resourcesForXml(channel):null;
+                                rendered=ApkPackageContents.decodeXml(data,table);
+                            }else rendered=readArchiveEntry(new java.io.ByteArrayInputStream(data),
+                                            format==ApkPackageContents.Format.TEXT?Kind.TEXT:Kind.IMAGE,data.length);
+                        }
+                    } catch (Exception | OutOfMemoryError failure) {
+                        error=archivePreviewError(failure);
+                    }
+                    Object ready=rendered;String message=error;
+                    ui.post(()->{
+                        if(!isCurrentSheet(sheet)||ticket!=request||!inDetail) {
+                            recycle(ready);
+                            return;
+                        }
+                        if(ready instanceof android.graphics.drawable.BitmapDrawable) {
+                            body.removeView(status);
+                            android.graphics.drawable.BitmapDrawable drawable=(android.graphics.drawable.BitmapDrawable)ready;
+                            ImageView image=new ImageView(FileViewerActivity.this);
+                            image.setContentDescription(entry.name);
+                            image.setAdjustViewBounds(true);
+                            image.setMaxHeight(dp(400));
+                            image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                            image.setImageDrawable(drawable);
+                            body.addView(image,new LinearLayout.LayoutParams(-1,-2));
+                        } else {
+                            status.setText(ready instanceof CharSequence?(CharSequence)ready:
+                                    message==null?"This package entry couldn’t be previewed.":message);
+                        }
+                    });
+                });
+            } catch(java.util.concurrent.RejectedExecutionException busy) {
+                status.setText("The viewer is busy. Go back and tap this entry to retry.");
+            }
+        }
+
+        private ApkResources.Table readResourceTable(java.nio.channels.FileChannel channel,ZipDirectory.Entry entry)
+                throws IOException{
+            java.util.Map.Entry<ZipDirectory.Entry,ApkResources.Table> cached=verifiedResourceTable;
+            if(cached!=null&&cached.getKey()==entry)return cached.getValue();
+            ApkResources.Table table=ApkResources.read(ApkPackageContents.readVerified(
+                    channel,entry,ApkPackageContents.Format.RESOURCE_TABLE));
+            PreviewText.cancelled();
+            verifiedResourceTable=new java.util.AbstractMap.SimpleImmutableEntry<>(entry,table);
+            return table;
+        }
+
+        private ApkResources.Table resourcesForXml(java.nio.channels.FileChannel channel){
+            if(xmlResourceTableTried||listing==null)return xmlResourceNames;
+            ZipDirectory.Entry match=null;
+            try{
+                int inspected=0;
+                for(ZipDirectory.Entry entry:listing.entries){
+                    if((inspected++&511)==0)PreviewText.cancelled();
+                    if(!"resources.arsc".equals(entry.name))continue;
+                    // Multiple ZIP entries with the same name are ambiguous.
+                    if(match!=null){xmlResourceTableTried=true;return null;}
+                    match=entry;
+                }
+                if(match!=null)xmlResourceNames=readResourceTable(channel,match);
+            }catch(IOException unavailable){
+                // A missing, malformed, oversized or unresolved table never prevents XML preview.
+            }
+            if(!Thread.currentThread().isInterrupted())xmlResourceTableTried=true;
+            return xmlResourceNames;
+        }
+
+        private void recycle(Object rendered) {
+            if(rendered instanceof android.graphics.drawable.BitmapDrawable)
+                ((android.graphics.drawable.BitmapDrawable)rendered).getBitmap().recycle();
+        }
+
+        private void clearDetail() {
+            detailPanel.removeAllViews();
+        }
+
+        private boolean backToContents() {
+            if(!inDetail)return false;
+            cancel();
+            clearDetail();
+            inDetail=false;
+            detailPanel.setVisibility(View.GONE);
+            listingPanel.setVisibility(View.VISIBLE);
+            listingPanel.requestFocus();
+            return true;
+        }
+
+        private void cancel() {
+            request++;
+            if(pending!=null) {
+                pending.cancel(true);
+                if(pending instanceof Runnable)PREVIEWS.remove((Runnable)pending);
+                pending=null;
+            }
+        }
+    }
+
+    private void showDexEntry() {
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(20), dp(12), dp(20), dp(16));
+        body.addView(text("Dalvik bytecode", 20, INK));
+        body.addView(text("Read Smali without running or changing this file.", 14, MUTED));
+        addPreviewAction(body, "Browse DEX classes", this::browseDex);
+        previewContent.addView(body, new FrameLayout.LayoutParams(-1, -2));
+    }
+
+    private void browseDex() {
+        if (shown == null || shown.identity == null || (kind != Kind.APK && kind != Kind.DEX)) return;
+        startActivity(DexViewerActivity.intent(this, uri, name, path, shown.identity,
+                session != null && session.root, kind == Kind.APK));
+    }
+
+    private boolean canExtract() {
+        if (shown == null) return false;
+        if (kind == Kind.STREAM_ARCHIVE) return StreamArchiveExtraction.format(name) != null
+                && shown.size<=ArchiveExtraction.MAX_BYTES && (shown.tar==null||!shown.tar.requiresDedicatedApp());
+        if (kind == Kind.SEVEN_Z) return shown.sevenZip != null && shown.sevenZip.count > 0;
+        return kind == Kind.ZIP && shown.archive != null && !shown.archive.truncated
+                && !shown.archive.entries.isEmpty() && ArchiveExtraction.supports(extension(name));
+    }
+
+    private void chooseExtraction() {
+        if (!canExtract() || extracting) return;
+        if (activeSheet != null) activeSheet.dismiss();
+        AppSheet sheet = new AppSheet(this,"Extract archive");
+        activeSheet = sheet;
+        sheet.setOnDismissListener(dialog->{
+            if(extractFolderPicker!=null){extractFolderPicker.dismiss();extractFolderPicker=null;}
+            if(activeSheet==sheet)activeSheet=null;
+        });
+        String downloads = android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS).getAbsolutePath();
+        String parent = path.isEmpty() ? null : new java.io.File(path).getParent();
+        // Never use root to create output. Shared storage roots in the index can use the backing path.
+        String shared = android.os.Environment.getExternalStorageDirectory().getAbsolutePath();
+        if (parent != null && shared.startsWith("/storage/emulated/")) {
+            String backing = "/data/media/" + new java.io.File(shared).getName();
+            if (parent.equals(backing) || parent.startsWith(backing + "/"))
+                parent = shared + parent.substring(backing.length());
+        }
+        StreamArchiveExtraction.Format stream = StreamArchiveExtraction.format(name);
+        String base = (stream == null ? name.substring(0,Math.max(0,name.lastIndexOf('.'))) : stream.stem(name)).trim();
+        try { ArchiveExtraction.validateLeaf(base); }
+        catch (IOException invalid) { base = "Extracted files"; }
+        sheet.content.addView(sheet.text("Files go into a new folder. Nothing existing will be replaced.",13,MUTED));
+        android.widget.EditText destination = new android.widget.EditText(this);
+        destination.setSingleLine(true);
+        destination.setText(parent == null || parent.startsWith("/data/") ? downloads : parent);
+        destination.setContentDescription("Destination folder");
+        android.widget.EditText folder = new android.widget.EditText(this);
+        folder.setSingleLine(true);
+        folder.setText(base);
+        folder.setContentDescription("New folder name");
+        sheet.content.addView(sheet.text("Destination folder",13,MUTED));
+        LinearLayout destinationRow=row();
+        destinationRow.addView(destination,new LinearLayout.LayoutParams(0,-2,1));
+        ImageButton browse=actionIcon(R.drawable.ic_folder,"Browse extraction destination",View.generateViewId());
+        browse.setImageTintList(android.content.res.ColorStateList.valueOf(UiTheme.fileColor(this,2)));
+        browse.setOnClickListener(v->chooseExtractionFolder(destination));
+        destinationRow.addView(browse,new LinearLayout.LayoutParams(dp(48),dp(48)));
+        sheet.content.addView(destinationRow);
+        sheet.content.addView(sheet.text("New folder name",13,MUTED));
+        sheet.content.addView(folder,new LinearLayout.LayoutParams(-1,-2));
+        sheet.action("Cancel",false,false,sheet::dismiss);
+        Button extract = sheet.action("Extract here",true,false,null);
+        extract.setOnClickListener(view->{
+            String to = destination.getText().toString().trim(), leaf = folder.getText().toString().trim();
+            try { FileOperationWorker.requirePath(to); }
+            catch (IOException invalid) { destination.setError("Enter an absolute folder path."); return; }
+            try { ArchiveExtraction.validateLeaf(leaf); }
+            catch (IOException invalid) { folder.setError("Enter a safe folder name."); return; }
+            sheet.dismiss();
+            extractArchive(to,leaf);
+        });
+        sheet.show();
+    }
+
+    private void chooseExtractionFolder(android.widget.EditText destination){
+        if(extractFolderPicker!=null)return;
+        FileIndex index=FileIndex.get(this);
+        String internal=android.os.Environment.getExternalStorageDirectory().getAbsolutePath();
+        java.util.function.UnaryOperator<String> normalize=path->{
+            if(path==null||!path.startsWith("/"))return null;
+            String direct=new File(path).toPath().normalize().toString();
+            if(direct.equals("/sdcard")||direct.startsWith("/sdcard/"))direct=internal+direct.substring(7);
+            try{return FileOperationWorker.requirePath(direct);}catch(IOException invalid){return null;}
+        };
+        java.util.Map<String,String> locations=new java.util.LinkedHashMap<>();
+        locations.put(internal,"Internal storage");
+        for(String root:index.roots()){
+            String path=normalize.apply(root);
+            if(path!=null&&path.startsWith("/storage/")&&!path.equals("/storage/emulated"))
+                locations.putIfAbsent(path,new File(path).getName());
+        }
+        java.util.function.Predicate<String> allowed=path->{
+            if(path==null)return false;
+            for(String volume:locations.keySet())if(path.equals(volume)||path.startsWith(volume+"/")){
+                String child=path.substring(volume.length());
+                return !child.equals("/Android/data")&&!child.startsWith("/Android/data/")
+                        &&!child.equals("/Android/obb")&&!child.startsWith("/Android/obb/");
+            }
+            return false;
+        };
+        extractFolderPicker=new FolderPathDialog(this,index,"Choose extraction folder",destination.getText().toString().trim(),normalize,
+                destination::setText,()->extractFolderPicker=null,locations,allowed,false,true,false);
+        extractFolderPicker.show();
+    }
+
+    private void extractArchive(String destination,String leaf) {
+        if (!canExtract() || extracting) return;
+        extracting = true;
+        Context context = getApplicationContext();
+        String sourcePath = path, identity = shown.identity, sourceName = name;
+        StreamArchiveExtraction.Format stream = StreamArchiveExtraction.format(sourceName);
+        boolean seven = kind == Kind.SEVEN_Z;
+        Uri source = uri;
+        boolean root = session != null && session.root;
+        note("Extracting into " + leaf + "…");
+        try {
+            actions.execute(()->{
+                String error = null;
+                java.nio.file.Path temporary = null;
+                try {
+                    temporary = java.nio.file.Files.createTempDirectory(context.getCacheDir().getCanonicalFile().toPath(),"archive-stage-");
+                    java.nio.file.Path staged = java.nio.file.Files.createDirectory(temporary.resolve(leaf));
+                    try (ParcelFileDescriptor descriptor = source == null ? SafeFileAccess.open(context,sourcePath,root)
+                            : context.getContentResolver().openFileDescriptor(source,"r")) {
+                        if (descriptor == null || !identity.equals(RootFileProvider.identity(Os.fstat(descriptor.getFileDescriptor()))))
+                            throw new IOException("The archive changed. Reopen it before extracting.");
+                        try (ParcelFileDescriptor.AutoCloseInputStream input = new ParcelFileDescriptor.AutoCloseInputStream(
+                                ParcelFileDescriptor.dup(descriptor.getFileDescriptor()))) {
+                            if (seven) SevenZipArchive.extract(input.getChannel(),staged);
+                            else if (stream == null) ArchiveExtraction.extract(input.getChannel(),staged);
+                            else StreamArchiveExtraction.extract(input.getChannel(),sourceName,stream,staged);
+                        }
+                        if (!identity.equals(RootFileProvider.identity(Os.fstat(descriptor.getFileDescriptor()))))
+                            throw new IOException("The archive changed during extraction. Nothing was extracted.");
+                    }
+                    FileClipboard.Snapshot snapshot = FileClipboard.capture(context,java.util.Collections.singletonList(
+                            new FileEntry(staged.toString(),true,0,-1)),false,false);
+                    try (FileOperationProcess copy = new FileOperationProcess(context,snapshot.request(destination),false,null)) {
+                        org.json.JSONObject result = copy.run();
+                        if (!result.optBoolean("ok")) throw new IOException(result.optString("error","Could not write to this folder."));
+                    }
+                    try {
+                        FileIndex.get(context).reconcilePaths(java.util.Collections.singletonList(destination+"/"+leaf));
+                    } catch (Exception ignored) { /* The completed output is still available in Files. */ }
+                } catch (Exception failure) {
+                    error = failure instanceof IOException && failure.getMessage() != null
+                            ? failure.getMessage() : "Could not extract to this folder. Check file access and free space.";
+                } finally {
+                    if (temporary != null) ArchiveExtraction.removeStaging(temporary);
+                }
+                final String problem = error;
+                ui.post(()->{
+                    extracting = false;
+                    if (destroyed || isFinishing()) return;
+                    String message = problem == null ? "Extracted to " + destination + "/" + leaf : problem;
+                    if (sourcePath.equals(path)) note(message);
+                    else Toast.makeText(this,message,Toast.LENGTH_LONG).show();
+                });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException busy) {
+            extracting = false; note("File access is busy. Try again.");
+        }
+    }
+
+    private void showSevenZip(SevenZipArchive.Listing listing) {
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        TextView intro = text(listing.count == 0 ? "This archive is empty."
+                : listing.count == 1 ? "1 archive entry" : listing.count + " archive entries",15,INK);
+        intro.setPadding(dp(18),dp(12),dp(18),dp(10));
+        column.addView(intro,new LinearLayout.LayoutParams(-1,-2));
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout rows = new LinearLayout(this);
+        rows.setPadding(dp(18),0,dp(18),dp(10));
+        rows.setOrientation(LinearLayout.VERTICAL);
+        for (SevenZipArchive.Entry entry : listing.entries) {
+            TextView line = text(entry.name,14,INK);
+            line.setMaxLines(2);
+            line.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            line.setPadding(0,dp(9),0,0);
+            if(!entry.directory){
+                line.setMinHeight(dp(48));
+                line.setOnClickListener(v->{
+                    String leaf=entry.name.substring(entry.name.lastIndexOf('/')+1);
+                    long length=Math.max(0,entry.size);
+                    showArchiveMember(leaf,length,(app,channel)->ArchiveEntryFile.write(app,length,
+                            output->SevenZipArchive.copyEntry(channel,entry,output)));
+                });
+            }
+            rows.addView(line,new LinearLayout.LayoutParams(-1,-2));
+            TextView metadata = text(entry.directory ? "Folder" : bytes(Math.max(0,entry.size)),12,MUTED);
+            metadata.setPadding(0,0,0,dp(8));
+            rows.addView(metadata,new LinearLayout.LayoutParams(-1,-2));
+            rows.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
+        }
+        if (listing.entries.size() < listing.count) {
+            TextView more = text("Only the first " + listing.entries.size() + " entries are shown. Extract all includes the rest.",13,MUTED);
+            more.setPadding(0,dp(12),0,dp(6));
+            rows.addView(more,new LinearLayout.LayoutParams(-1,-2));
+        }
+        scroll.addView(rows,new ScrollView.LayoutParams(-1,-2));
+        column.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        if (canExtract()) showExtractDock(column);
+        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private void showStreamArchive(StreamArchiveExtraction.Format format,TarArchiveListing.Listing listing) {
+        if (format == null) { failure("This archive format could not be identified."); return; }
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(22),dp(20),dp(22),dp(20));
+        body.addView(text(format.label,18,INK));
+        if(listing==null){
+            body.addView(text("Extracts one file: " + StreamArchiveExtraction.decompressedName(name),14,MUTED));
+        }else{
+            String caption;
+            switch(listing.stop){
+                case COMPLETE: caption=listing.entries.isEmpty()?"This archive is empty."
+                        :listing.entries.size()==1?"1 entry":"Contents · "+listing.entries.size()+" entries";break;
+                case ENTRY_LIMIT:caption="Showing the first "+listing.entries.size()+" entries. More entries may follow.";break;
+                case READ_LIMIT:caption="Partial listing. The preview reached its scan limit.";break;
+                default:caption="Partial listing. An unsupported record needs a dedicated archive app.";
+            }
+            TextView description=text(caption,13,MUTED);
+            description.setPadding(0,dp(4),0,dp(8));
+            body.addView(description);
+            for(TarArchiveListing.Member member:listing.entries){
+                TextView label=text(member.name,14,INK);
+                label.setMaxLines(2);
+                label.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                label.setPadding(0,dp(8),0,0);
+                if(TarArchiveListing.canPreview(member,format.gzip)
+                        &&(!format.gzip||shown!=null&&shown.size<=TarArchiveListing.MAX_COMPRESSED)){
+                    label.setMinHeight(dp(48));label.setTextColor(theme.accent);
+                    label.setOnClickListener(v->{
+                        String leaf=member.name.substring(member.name.lastIndexOf('/')+1);
+                        showArchiveMember(leaf,member.size,(app,channel)->ArchiveEntryFile.write(app,member.size,
+                                output->TarArchiveListing.copyEntry(channel,format.gzip,member,output)));
+                    });
+                }
+                body.addView(label);
+                TextView details=text(member.special?"Special file · review only"
+                        :member.directory?"Folder":bytes(member.size),12,MUTED);
+                details.setPadding(0,0,0,dp(8));
+                body.addView(details);
+                body.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
+            }
+            String note=listing.specialEntries?"This archive contains links or special files. Use a dedicated archive app."
+                    :shown!=null&&shown.size>ArchiveExtraction.MAX_BYTES?"Archives over 1 GB need a dedicated app to extract."
+                     :"Tap an eligible file to preview it without extracting the archive.";
+            TextView help=text(note,13,MUTED);help.setPadding(0,dp(12),0,0);
+            body.addView(help);
+        }
+        scroll.addView(body,new ScrollView.LayoutParams(-1,-2));
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        if(canExtract())showExtractDock(column);
+        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private void showArchive(ZipDirectory.Listing result) {
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+        if (result.entries.isEmpty() && !result.truncated) {
+            TextView empty = text("This archive is empty.", 14, MUTED); empty.setGravity(Gravity.CENTER); column.addView(empty,new LinearLayout.LayoutParams(-1,0,1));
+        } else {
+            EdgeFastScroll.List entries=new EdgeFastScroll.List(this);
+            entries.labels=p->result.entries.get(p).name;entries.enableReleasePick();archiveList=entries; archiveList.setPadding(dp(12),dp(8),dp(12),dp(8));
             archiveList.setDivider(new android.graphics.drawable.ColorDrawable(theme.line)); archiveList.setDividerHeight(dp(1));
             archiveList.setAdapter(new ArchiveAdapter(result.entries));
             archiveList.setOnItemClickListener((parent, view, position, id) -> showArchiveEntry(result.entries.get(position)));
             archiveList.setSelectionFromTop(Math.min(archivePosition, Math.max(0, result.entries.size() - 1)), archiveTop);
-            previewContent.addView(archiveList, new FrameLayout.LayoutParams(-1, -1));
+            column.addView(archiveList,new LinearLayout.LayoutParams(-1,0,1));
         }
         details.setText(metadata() + " · " + NumberFormat.getIntegerInstance().format(result.totalEntries) + (result.totalEntries == 1 ? " entry" : " entries"));
+        if (canExtract()) showExtractDock(column);
         if (result.truncated) note("Showing " + result.entries.size() + " entries within the preview limit. Use Open for the full archive.");
+    }
+
+    private void showExtractDock(LinearLayout column) {
+        // Keep the primary control aligned with the sheet's right-hand confirmation.
+        column.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
+        LinearLayout dock = row();
+        dock.setPadding(dp(20),dp(8),dp(20),dp(12));
+        int width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(24),dp(560));
+        LinearLayout.LayoutParams dockLayout = new LinearLayout.LayoutParams(Math.max(dp(48),width),-2);
+        dockLayout.gravity = Gravity.CENTER_HORIZONTAL;
+        column.addView(dock,dockLayout);
+        dock.addView(new View(this),new LinearLayout.LayoutParams(0,1,1));
+        Button extract = button("Extract all…");
+        extract.setTextColor(theme.dark ? theme.surface : Color.WHITE);
+        extract.setBackground(controlBackground(theme.accent,14));
+        extract.setOnClickListener(v->chooseExtraction());
+        LinearLayout.LayoutParams action = new LinearLayout.LayoutParams(0,dp(48),1);
+        action.setMarginStart(dp(10));
+        dock.addView(extract,action);
     }
 
     private void showArchiveEntry(ZipDirectory.Entry entry) {
@@ -660,6 +1710,11 @@ public final class FileViewerActivity extends Activity {
         if (activeSheet != null) activeSheet.dismiss();
         String entryName = entry.name.substring(entry.name.lastIndexOf('/') + 1);
         Kind format = kindFor(entryName, mimeFor(entryName));
+        if (format == Kind.AUDIO || format == Kind.VIDEO || format == Kind.OFFICE
+                || format == Kind.ZIP || format == Kind.SEVEN_Z) {
+            openArchivePreview(entry,entryName);
+            return;
+        }
         AppSheet sheet = new AppSheet(this, entryName, format == Kind.PDF);
         activeSheet = sheet;
         TextView location = sheet.text(name + "  ›  " + entry.name + "  ·  " + bytes(entry.size), 12, MUTED);
@@ -692,7 +1747,7 @@ public final class FileViewerActivity extends Activity {
                         ui.post(() -> {
                             if (!isCurrentSheet(sheet)) return;
                             share.setEnabled(true);
-                            if (result != null) handOffFile(result, entryName, mimeFor(entryName), true, true);
+                            if (result != null) handOffFile(result, entryName, true, true);
                             else Toast.makeText(this, message == null ? "This ZIP entry could not be shared." : message, Toast.LENGTH_LONG).show();
                         });
                     });
@@ -766,6 +1821,88 @@ public final class FileViewerActivity extends Activity {
 
     private boolean isCurrentSheet(AppSheet sheet) {
         return !destroyed && activeSheet == sheet && sheet.isShowing();
+    }
+
+    private void openArchivePreview(ZipDirectory.Entry entry,String entryName){
+        showArchiveMember(entryName,entry.size,(app,channel)->{
+            if(entry.special||entry.encrypted||entry.crc<0)throw new IOException("This archive entry cannot be safely previewed.");
+            try(java.util.zip.CheckedInputStream input=new java.util.zip.CheckedInputStream(
+                    ZipDirectory.open(channel,entry),new java.util.zip.CRC32())){
+                ParcelFileDescriptor copy=ArchiveEntryFile.copy(app,input,entry.size);
+                if(input.getChecksum().getValue()!=entry.crc){
+                    copy.close();throw new IOException("This archive entry is damaged: checksum does not match.");
+                }
+                return copy;
+            }
+        });
+    }
+
+    private interface ArchiveMemberReader {
+        ParcelFileDescriptor decode(Context app,java.nio.channels.FileChannel channel)throws Exception;
+    }
+
+    /** Reuse the bounded ordinary viewer after reading a verified private source. */
+    private void showArchiveMember(String entryName,long entrySize,ArchiveMemberReader member){
+        if(shown==null)return;
+        AppSheet progress=new AppSheet(this,entryName);
+        activeSheet=progress;
+        TextView status=progress.text("Checking archive entry…",14,MUTED);
+        progress.content.addView(status);
+        progress.action("Close",false,false,null);
+        String sourcePath=path,identity=shown.identity;
+        Uri sourceUri=uri;
+        boolean root=session!=null&&session.root;
+        Context app=getApplicationContext();
+        CancellationSignal canceled=new CancellationSignal();
+        java.util.concurrent.atomic.AtomicReference<Future<?>> pending=new java.util.concurrent.atomic.AtomicReference<>();
+        progress.setOnDismissListener(ignored->{
+            if(activeSheet==progress)activeSheet=null;
+            canceled.cancel();
+            Future<?> task=pending.getAndSet(null);
+            if(task!=null)task.cancel(true);
+        });
+        progress.show();
+        try{
+            pending.set(PREVIEWS.submit(()->{
+                Uri uri=null;
+                String error=null;
+                try{
+                    int depth=ArchivePreviewSources.depth(sourceUri)+1;
+                    if(depth>ArchivePreviewSources.MAX_DEPTH)throw new IOException("Nested archive previews are limited to four levels.");
+                    try(ParcelFileDescriptor descriptor=sourceUri==null?SafeFileAccess.open(app,sourcePath,root)
+                                :app.getContentResolver().openFileDescriptor(sourceUri,"r",canceled)){
+                        if(descriptor==null||!identity.equals(RootFileProvider.identity(Os.fstat(descriptor.getFileDescriptor()))))
+                            throw new IOException("The archive changed. Reopen it.");
+                        try(ParcelFileDescriptor.AutoCloseInputStream archive=new ParcelFileDescriptor.AutoCloseInputStream(
+                                ParcelFileDescriptor.dup(descriptor.getFileDescriptor()))){
+                            ParcelFileDescriptor snapshot=member.decode(app,archive.getChannel());
+                            try{
+                                if(!identity.equals(RootFileProvider.identity(Os.fstat(descriptor.getFileDescriptor()))))
+                                    throw new IOException("The archive changed while reading its entry.");
+                                if(canceled.isCanceled()||Thread.currentThread().isInterrupted())
+                                    throw new java.io.InterruptedIOException();
+                                uri=ArchivePreviewSources.publish(snapshot,entrySize,entryName,depth);
+                                snapshot=null;
+                            }finally{if(snapshot!=null)snapshot.close();}
+                        }
+                    }
+                }catch(Exception|OutOfMemoryError failure){error=archivePreviewError(failure);}
+                Uri prepared=uri;String message=error;
+                if(canceled.isCanceled()||destroyed||!MAIN.post(()->{
+                    if(!isCurrentSheet(progress)){ArchivePreviewSources.release(prepared);return;}
+                    if(prepared==null){status.setText(message==null?"Could not open this archive entry.":message);return;}
+                    pending.set(null);
+                    progress.dismiss();activeSheet=null;
+                    try{startActivity(intent(this,prepared,entryName,null,entrySize));}
+                    catch(RuntimeException unable){
+                        ArchivePreviewSources.release(prepared);
+                        Toast.makeText(this,"Could not open this archive entry.",Toast.LENGTH_LONG).show();
+                    }
+                }))ArchivePreviewSources.release(prepared);
+            }));
+        }catch(java.util.concurrent.RejectedExecutionException busy){
+            status.setText("Preview is busy. Close this message and try again.");
+        }
     }
 
     private static String archivePreviewError(Throwable failure) {
@@ -924,26 +2061,34 @@ public final class FileViewerActivity extends Activity {
                 if (format == Kind.HTML) return RichText.html(text.text);
                 return text.text;
             default:
-                throw new IOException("In-archive playback or document rendering is unavailable for this format.");
+                throw new IOException("This entry is not supported by the in-archive reader.");
         }
     }
 
     private final class ArchiveAdapter extends BaseAdapter {
         private final List<ZipDirectory.Entry> entries;
-        ArchiveAdapter(List<ZipDirectory.Entry> entries) { this.entries = entries; }
+        private final boolean packageContents;
+        ArchiveAdapter(List<ZipDirectory.Entry> entries) { this(entries,false); }
+        ArchiveAdapter(List<ZipDirectory.Entry> entries,boolean packageContents) {
+            this.entries=entries; this.packageContents=packageContents;
+        }
         @Override public int getCount() { return entries.size(); }
         @Override public Object getItem(int position) { return entries.get(position); }
         @Override public long getItemId(int position) { return position; }
         @Override public boolean areAllItemsEnabled() { return false; }
         @Override public boolean isEnabled(int position) {
             ZipDirectory.Entry entry = entries.get(position);
-            return !entry.directory && !entry.encrypted;
+            return packageContents || !entry.directory && !entry.encrypted;
         }
         @Override public View getView(int position, View recycled, ViewGroup parent) {
             LinearLayout item;
             if (recycled instanceof LinearLayout) item = (LinearLayout) recycled;
             else {
                 item = row(); item.setMinimumHeight(dp(58)); item.setPadding(dp(6), dp(8), dp(6), dp(8));
+                android.graphics.drawable.StateListDrawable press=new android.graphics.drawable.StateListDrawable();
+                press.addState(new int[]{android.R.attr.state_pressed},AppSheet.shape(theme.selected,dp(8)));
+                press.addState(new int[0],new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+                item.setBackground(press);
                 ImageView icon = new ImageView(FileViewerActivity.this);icon.setPadding(dp(9),dp(9),dp(9),dp(9));
                 icon.setBackground(AppSheet.shape(theme.selected,dp(12)));item.addView(icon,new LinearLayout.LayoutParams(dp(40),dp(40)));
                 LinearLayout labels = new LinearLayout(FileViewerActivity.this); labels.setPadding(dp(10), 0, 0, 0); labels.setOrientation(LinearLayout.VERTICAL);
@@ -954,12 +2099,15 @@ public final class FileViewerActivity extends Activity {
             }
             ZipDirectory.Entry entry = entries.get(position);
             ImageView icon = (ImageView) item.getChildAt(0);
-            icon.setImageResource(entry.directory ? R.drawable.ic_folder : R.drawable.ic_file);
-            icon.setImageTintList(android.content.res.ColorStateList.valueOf(entry.directory ? ACCENT : MUTED));
+            FileEntry iconEntry=new FileEntry(entry.name,entry.directory,entry.size,0);
+            icon.setImageResource(UiTheme.fileIcon(FileViewerActivity.this,iconEntry));
+            icon.setImageTintList(UiTheme.fileTint(FileViewerActivity.this,FileTypes.category(iconEntry)));
             LinearLayout labels = (LinearLayout) item.getChildAt(1);
             ((TextView) labels.getChildAt(0)).setText(entry.name);
-            ((TextView) labels.getChildAt(1)).setText((entry.directory ? "Folder" : bytes(entry.size)) + (entry.encrypted ? " · encrypted" : ""));
-            item.getChildAt(2).setVisibility(entry.directory||entry.encrypted?View.INVISIBLE:View.VISIBLE);
+            ((TextView) labels.getChildAt(1)).setText(packageContents
+                    ? ApkPackageContents.type(entry)+(entry.directory?"":" · "+bytes(entry.size))
+                    : (entry.directory ? "Folder" : bytes(entry.size)) + (entry.encrypted ? " · encrypted" : ""));
+            item.getChildAt(2).setVisibility(!packageContents&&(entry.directory||entry.encrypted)?View.INVISIBLE:View.VISIBLE);
             return item;
         }
     }
@@ -983,17 +2131,47 @@ public final class FileViewerActivity extends Activity {
         if (shown != null) { shown.close(); shown = null; }
     }
 
-    private void failure(String message) {
-        loadingPlaceholder=null;previewContent.removeAllViews();
-        LinearLayout card=new LinearLayout(this);card.setOrientation(LinearLayout.VERTICAL);card.setGravity(Gravity.CENTER_HORIZONTAL);
-        card.setBackground(panel(theme.surface,20));card.setPadding(dp(20),dp(16),dp(20),dp(8));
-        TextView error=text(message,14,MUTED);error.setGravity(Gravity.CENTER);card.addView(error);
-        if(uri!=null||session!=null){Button open=button("Open in another app");open.setOnClickListener(v->openExternal());
-            card.addView(open,new LinearLayout.LayoutParams(-2,dp(48)));}
-        FrameLayout.LayoutParams layout=new FrameLayout.LayoutParams(-1,-2,Gravity.CENTER);
-        layout.setMargins(dp(24),0,dp(24),0);previewContent.addView(card,layout);
+    private View addLoadingIndicator(FrameLayout frame,String label){
+        LinearLayout pill=row();pill.setPadding(dp(12),0,dp(12),0);
+        pill.setBackground(panel(theme.surface,14));pill.setGravity(Gravity.CENTER);
+        pill.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        ProgressBar progress=new ProgressBar(this,null,android.R.attr.progressBarStyleSmall);
+        progress.setIndeterminateTintList(ColorStateList.valueOf(ACCENT));
+        progress.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        pill.addView(progress,new LinearLayout.LayoutParams(dp(20),dp(20)));
+        TextView status=text(label,12,INK);status.setPadding(dp(10),0,0,0);
+        pill.addView(status,new LinearLayout.LayoutParams(-2,dp(44)));
+        frame.addView(pill,new FrameLayout.LayoutParams(-2,-2,Gravity.CENTER));
+        return pill;
     }
 
+    private void failure(String message){failure(message,false);}
+    private void failure(String message,boolean retry){
+        loadingPlaceholder=null;formatGuideTarget=null;previewContent.removeAllViews();
+        ScrollView body=new ScrollView(this);body.setFillViewport(false);
+        LinearLayout content=new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);content.setGravity(Gravity.START);
+        content.setPadding(dp(24),dp(16),dp(24),dp(16));
+        ImageView file=new ImageView(this);file.setImageResource(R.drawable.ic_file);file.setImageTintList(ColorStateList.valueOf(MUTED));
+        file.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        content.addView(file,new LinearLayout.LayoutParams(dp(22),dp(22)));
+        TextView heading=text("Preview unavailable",16,INK);heading.setPadding(0,dp(12),0,0);
+        heading.setTypeface(getResources().getFont(R.font.inter_semibold));if(Build.VERSION.SDK_INT>=28)heading.setAccessibilityHeading(true);
+        content.addView(heading);
+        TextView error=text(message,13,MUTED);error.setPadding(0,dp(6),0,dp(10));error.setLineSpacing(dp(2),1f);content.addView(error);
+        if(retry)addPreviewAction(content,"Try again",this::load);
+        if(canReadAsText())addPreviewAction(content,"Read as text",()->{
+            plainTextOverride=true;kind=Kind.TEXT;load();
+        });
+        if(uri!=null||session!=null)addPreviewAction(content,"Open in another app",this::openExternal);
+        if(canReturnFile())addPreviewAction(content,"Show in Anything Files",this::revealFile);
+        body.addView(content,new ScrollView.LayoutParams(-1,-2));
+        previewContent.addView(body,new FrameLayout.LayoutParams(-1,-2,Gravity.CENTER));
+    }
+    private void addPreviewAction(LinearLayout column,String label,Runnable action){
+        Button button=button(label);button.setTextColor(ACCENT);button.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
+        button.setPadding(0,0,dp(8),0);button.setMinHeight(dp(48));button.setOnClickListener(v->action.run());
+        column.addView(button,new LinearLayout.LayoutParams(-2,-2));
+    }
     private void note(String message) { notice.setText(message); notice.setVisibility(View.VISIBLE); }
 
     private void openExternal() {
@@ -1005,22 +2183,16 @@ public final class FileViewerActivity extends Activity {
             try{actions.execute(()->{try{Uri grant=RootFileProvider.issue(context,entry,root,identity);ui.post(()->{if(!destroyed&&!isFinishing()&&entry.path().equals(path)){uri=grant;sendCurrentFile(share);}});}
                 catch(Exception failure){ui.post(()->{if(!destroyed&&!isFinishing())Toast.makeText(this,failure.getMessage(),Toast.LENGTH_LONG).show();});}});}
             catch(java.util.concurrent.RejectedExecutionException busy){Toast.makeText(this,"File access is busy",Toast.LENGTH_SHORT).show();}return;}
-        handOffFile(uri, name, mime, share, false);
+        handOffFile(uri, name, share, false);
     }
 
-    private void handOffFile(Uri file, String label, String mimeType, boolean share, boolean archiveEntry) {
-        Intent target = share ? new Intent(Intent.ACTION_SEND).setType(mimeType).putExtra(Intent.EXTRA_STREAM, file)
-                : new Intent(Intent.ACTION_VIEW).setDataAndType(file, mimeType);
-        target.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).setClipData(ClipData.newRawUri(label, file));
-        try {
-            sharingArchiveEntry = archiveEntry;
-            startActivity(Intent.createChooser(target, share ? "Share file" : "Open file"));
-        } catch (ActivityNotFoundException unavailable) {
+    private void handOffFile(Uri file, String label, boolean share, boolean archiveEntry) {
+        sharingArchiveEntry = archiveEntry;
+        String failure = ExternalFileActions.launch(this, file, label, share);
+        if (failure != null) {
             sharingArchiveEntry = false;
-            Toast.makeText(this, share ? "No installed app can share this file." : "No installed app can open this file.", Toast.LENGTH_SHORT).show();
-        } catch (SecurityException denied) {
-            sharingArchiveEntry = false;
-            Toast.makeText(this, "File access expired. Return to results and open it again.", Toast.LENGTH_LONG).show();
+            if (archiveEntry) Toast.makeText(this,failure,Toast.LENGTH_LONG).show();
+            else note(failure);
         }
     }
 
@@ -1047,41 +2219,59 @@ public final class FileViewerActivity extends Activity {
     private int dp(float value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private TextView text(String value, float size, int color) {
         TextView text = new TextView(this); text.setText(value); text.setTextSize(size); text.setTextColor(color); text.setGravity(Gravity.CENTER_VERTICAL);
-        text.setTypeface(getResources().getFont(R.font.aeonik));return text;
+        text.setTypeface(getResources().getFont(R.font.inter));return text;
     }
     private LinearLayout row() { LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL); return row; }
     private Button button(String label) {
         Button button = new Button(this, null, 0); button.setText(label); button.setAllCaps(false); button.setTextSize(13);
         button.setGravity(Gravity.CENTER);
         button.setTextColor(new ColorStateList(new int[][]{{-android.R.attr.state_enabled},{}},new int[]{MUTED,ACCENT}));
-        button.setTypeface(getResources().getFont(R.font.aeonik_medium));
+        button.setTypeface(getResources().getFont(R.font.inter_medium));
         button.setMinHeight(0); button.setMinimumHeight(0); button.setMinWidth(0); button.setMinimumWidth(0);
         button.setBackground(controlBackground(Color.TRANSPARENT,24)); return button;
     }
 
-    static String mimeFor(String name) {
-        String extension = extension(name);
-        if ("apk".equals(extension)) return "application/vnd.android.package-archive";
-        if ("md".equals(extension) || "log".equals(extension) || "ini".equals(extension)) return "text/plain";
-        if ("mkv".equals(extension)) return "video/x-matroska";
-        String type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
-        return type == null ? "application/octet-stream" : type;
+    static String mimeFor(String name) { return ExternalFileActions.mimeFor(name); }
+    private boolean canReadAsText() {
+        return kind==Kind.OTHER && !isExternalArchive(extension(name)) && !isSplitPackage(extension(name))
+                && (uri!=null || session!=null && !path.isEmpty());
     }
+
+    private static boolean isExternalArchive(String ext) {
+        return has("rar xz bz2 zst tbz2 txz",ext);
+    }
+
+    private static boolean isSplitPackage(String ext) {
+        return has("apks apkm xapk",ext);
+    }
+
+    private static String otherPreviewMessage(String ext) {
+        if (isSplitPackage(ext)) return "This is an APK bundle, not a standalone APK. It needs a compatible bundle installer.";
+        if (isExternalArchive(ext)) return "This archive format needs a dedicated archive app. Extract ZIP, JAR, CBZ, TAR, GZIP, and supported 7z files directly in Anything.";
+        return "Preview is unavailable for this file type.";
+    }
+
     private static String extension(String name) {
         int dot = name.lastIndexOf('.'); return dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
     }
     private static Kind kindFor(String name, String mime) {
         String ext = extension(name);
         if ("pdf".equals(ext)) return Kind.PDF;
+        if (OfficePreview.format(name)!=null) return Kind.OFFICE;
         if(has("svg svgz",ext))return Kind.SVG;
         if(has("md markdown",ext))return Kind.MARKDOWN;
         if(has("html htm",ext))return Kind.HTML;
-        if (has("zip apk jar cbz", ext)) return Kind.ZIP;
+        if ("apk".equals(ext)) return Kind.APK;
+        if ("dex".equals(ext)) return Kind.DEX;
+        if (ArchiveExtraction.supports(ext)) return Kind.ZIP;
+        if ("7z".equals(ext)) return Kind.SEVEN_Z;
+        if (StreamArchiveExtraction.format(name) != null) return Kind.STREAM_ARCHIVE;
+        // .ts can be TypeScript or MPEG transport stream; the worker checks the file header before opening.
+        if ("ts".equals(ext)) return Kind.TEXT;
         if (has("jpg jpeg png gif webp bmp heic heif avif ico", ext) || (mime.startsWith("image/") && !"svg".equals(ext) && !"svgz".equals(ext))) return Kind.IMAGE;
         if (mime.startsWith("video/") || has("mp4 m4v mkv webm 3gp 3gpp mov avi mpeg mpg ts mts", ext)) return Kind.VIDEO;
         if (mime.startsWith("audio/") || has("mp3 m4a aac wav ogg oga opus flac amr mid midi aif aiff", ext)) return Kind.AUDIO;
-        if (mime.startsWith("text/") || has("txt md markdown log json jsonl xml csv tsv html htm css js mjs tsx jsx java kt kts py sh bash zsh ini conf config cfg properties yml yaml toml sql c h cpp hpp rs go swift gradle gitignore env svg", ext)
-                || name.equalsIgnoreCase("README") || name.equalsIgnoreCase("LICENSE") || name.equalsIgnoreCase("Makefile")) return Kind.TEXT;
+        if (mime.startsWith("text/") || CodeSyntax.known(name)) return Kind.TEXT;
         return Kind.OTHER;
     }
     private static boolean has(String values, String value) { return !value.isEmpty() && (" " + values + " ").contains(" " + value + " "); }
@@ -1099,6 +2289,7 @@ public final class FileViewerActivity extends Activity {
             icon.setPadding(dp(28),dp(28),dp(28),dp(28));icon.setBackground(panel(theme.selected,28));
             mediaAnchor.addView(icon, new FrameLayout.LayoutParams(dp(112), dp(112), Gravity.CENTER));
         }
+        mediaLoading=addLoadingIndicator(mediaAnchor,kind==Kind.VIDEO?"Preparing video":"Preparing audio");
         controller = new PlaybackControls(this,kind==Kind.VIDEO,this::handleBack,()->adjustMedia(false),()->adjustMedia(true),this::choosePlaybackSpeed); controller.setAnchorView(mediaAnchor); controller.setMediaPlayer(new MediaControls(this)); controller.setEnabled(false);
         mediaAnchor.setOnClickListener(view -> {
             if(controller!=null&&kind==Kind.VIDEO&&controller.isShowing()&&isPlaying())controller.hide();
@@ -1151,11 +2342,12 @@ public final class FileViewerActivity extends Activity {
     }
     private void mediaFailure() {
         releaseMedia(); clearShown();
-        failure("This media format or codec cannot be played on this device. Use Open to choose another app.");
+        failure("This device can’t play this media format or codec.");
     }
     private void releaseMedia() {
         ui.removeCallbacks(mediaTimeout);
         if (controller != null) { controller.hide(); controller.setEnabled(false); controller = null; }
+        mediaLoading=null;
         if (player != null) {
             MediaPlayer old = player; player = null; prepared = false;
             old.setOnPreparedListener(null); old.setOnSeekCompleteListener(null); old.setOnVideoSizeChangedListener(null);
@@ -1309,7 +2501,9 @@ public final class FileViewerActivity extends Activity {
         }
         @Override public void onPrepared(MediaPlayer media) {
             FileViewerActivity activity = active(media); if (activity == null) return;
-            activity.prepared = true; activity.ui.removeCallbacks(activity.mediaTimeout); activity.controller.setEnabled(true);
+            activity.prepared=true;activity.ui.removeCallbacks(activity.mediaTimeout);activity.controller.setEnabled(true);
+            if(activity.mediaLoading!=null){activity.mediaAnchor.removeView(activity.mediaLoading);activity.mediaLoading=null;}
+            if(activity.kind==Kind.VIDEO&&!activity.playWhenReady&&activity.previewContent!=null)activity.previewContent.reveal();
             if(activity.playbackSpeed!=1)try{media.setPlaybackParams(media.getPlaybackParams().setSpeed(activity.playbackSpeed));media.pause();}catch(RuntimeException unsupported){activity.playbackSpeed=1;}
             if(activity.controller instanceof PlaybackControls)((PlaybackControls)activity.controller).speed(activity.playbackSpeed);
             int duration = Math.max(0, media.getDuration()); activity.mediaPosition = Math.min(activity.mediaPosition, Math.max(0, duration - 1));
@@ -1349,14 +2543,18 @@ public final class FileViewerActivity extends Activity {
         final android.graphics.Picture picture;
         final android.text.Spanned formatted;
         final PreviewText.Result text;
+        final CodeSyntax.Model code;
+        final OfficePreview.Result office;
         final ZipDirectory.Listing archive;
+        final TarArchiveListing.Listing tar;
         final int orientation,width,height,page,pageCount,bytes;
-        PreviewData(PreviewResult result){bitmap=result.bitmap;picture=result.picture;formatted=result.formatted;text=result.text;archive=result.archive;orientation=result.orientation;
+        PreviewData(PreviewResult result){bitmap=result.bitmap;picture=result.picture;formatted=result.formatted;text=result.text;code=result.code;office=result.office;archive=result.archive;tar=result.tar;orientation=result.orientation;
             width=result.width;height=result.height;page=result.page;pageCount=result.pageCount;
-            int count=256+result.vectorBytes+(bitmap==null?0:bitmap.getAllocationByteCount())+(text==null?0:text.text.length()*2)+(formatted==null?0:formatted.length()*4);
-            if(archive!=null)for(ZipDirectory.Entry entry:archive.entries)count+=64+entry.name.length()*2;
+            int count=256+result.vectorBytes+(bitmap==null?0:bitmap.getAllocationByteCount())+(text==null?0:text.text.length()*2)+(formatted==null?0:formatted.length()*4)+(code==null?0:code.memoryBytes())+(office==null?0:office.memoryBytes());
+            if(archive!=null)for(ZipDirectory.Entry entry:archive.entries)count+=80+entry.name.length()*2+(entry.rawName==null?0:entry.rawName.length()*2);
+            if(tar!=null)for(TarArchiveListing.Member member:tar.entries)count+=64+member.name.length()*2;
             bytes=count;result.sharedBitmap=true;}
-        void copyTo(PreviewResult result){result.bitmap=bitmap;result.picture=picture;result.formatted=formatted;result.text=text;result.archive=archive;result.orientation=orientation;
+        void copyTo(PreviewResult result){result.bitmap=bitmap;result.picture=picture;result.formatted=formatted;result.text=text;result.code=code;result.office=office;result.archive=archive;result.tar=tar;result.orientation=orientation;
             result.width=width;result.height=height;result.page=page;result.pageCount=pageCount;result.sharedBitmap=true;result.cached=true;}
     }
     private static final class ViewState {
@@ -1372,7 +2570,13 @@ public final class FileViewerActivity extends Activity {
         int vectorBytes;
         ParcelFileDescriptor media;
         PreviewText.Result text;
+        CodeSyntax.Model code;
+        OfficePreview.Result office;
+        boolean transportStream;
         ZipDirectory.Listing archive;
+        TarArchiveListing.Listing tar;
+        SevenZipArchive.Listing sevenZip;
+        ApkInstallAction.Details apk;
         int orientation = 1, width, height, page, pageCount;
         long size = -1;
         long cpuNanos;
@@ -1382,7 +2586,8 @@ public final class FileViewerActivity extends Activity {
         @Override public void close() {
             if (bitmap != null) { if (!sharedBitmap&&!bitmap.isRecycled()) bitmap.recycle(); bitmap = null; }
             if (media != null) { try { media.close(); } catch (IOException ignored) { } media = null; }
-            picture=null;formatted=null;text = null; archive = null;
+            if (apk != null) { apk.close(); apk = null; }
+            picture=null;formatted=null;text = null;code=null;office=null; archive = null; tar = null; sevenZip = null;
         }
     }
 
@@ -1393,13 +2598,15 @@ public final class FileViewerActivity extends Activity {
         FileEntry entry;
         boolean allowRoot,restoreState;
         final String sourcePath;
+        String sourceName;
+        final CodeSyntax.Language language;
         final Kind kind;
         final int requestedPage, generation;
         final AtomicBoolean cancelled = new AtomicBoolean();
         final CancellationSignal signal = new CancellationSignal();
         PreviewJob(FileViewerActivity owner, Context context, Uri uri, Kind kind, int page, int generation) {
             this.owner = new WeakReference<>(owner); this.context = context; this.uri = uri; this.kind = kind; requestedPage = page; this.generation = generation;
-            sourcePath=owner==null?String.valueOf(uri):owner.path;allowRoot=owner!=null&&owner.session!=null&&owner.session.root;
+            sourcePath=owner==null?String.valueOf(uri):owner.path;sourceName=owner==null?"":owner.name;language=owner==null?null:owner.readerLanguage;allowRoot=owner!=null&&owner.session!=null&&owner.session.root;
         }
         void cancel() { cancelled.set(true); signal.cancel(); }
         @Override public void run() {
@@ -1412,22 +2619,29 @@ public final class FileViewerActivity extends Activity {
             try {
                 checkCancelled();
                 result.uri=uri;
-                if(kind==Kind.OTHER){result.error="Preview is unavailable for this file type. Use Open to choose another app.";return result;}
+                if(kind==Kind.OTHER){
+                    String ext = extension(sourceName);
+                    result.error = otherPreviewMessage(ext);
+                    return result;
+                }
                 file = uri==null&&entry!=null?SafeFileAccess.open(context,entry.path(),allowRoot):context.getContentResolver().openFileDescriptor(uri, "r", signal);
                 if (file == null) throw new IOException("File access is unavailable.");
                 checkCancelled(); result.size = file.getStatSize();
                 if (result.size < 0) throw new IOException("This file does not support a seekable preview.");
                 result.identity=RootFileProvider.identity(Os.fstat(file.getFileDescriptor()));
                 result.key=sourcePath+'\0'+allowRoot+':'+result.identity;
+                if(kind==Kind.TEXT&&"ts".equals(extension(sourceName))&&looksLikeTransportStream(file,result.size)){
+                    result.transportStream=true;result.media=file;file=null;return result;
+                }
                 boolean preciseMetadata=Build.VERSION.SDK_INT>=27;
                 if(restoreState&&preciseMetadata)synchronized(VIEW_STATES){result.state=VIEW_STATES.get(result.key);}
                 int wantedPage=result.state==null?requestedPage:result.state.page;
-                String cacheKey=result.key+':'+kind+':'+(kind==Kind.PDF?wantedPage:0);
+                String cacheKey=result.key+':'+kind+':'+(kind==Kind.PDF?wantedPage:0)+':'+sourceName+':'+language;
                 // API 26 exposes only whole-second metadata; re-read rather than reuse an ambiguous identity.
-                PreviewData existing=preciseMetadata?CACHE.get(cacheKey):null;
+                PreviewData existing=preciseMetadata && kind!=Kind.APK && kind!=Kind.SEVEN_Z?CACHE.get(cacheKey):null;
                 if(existing!=null){existing.copyTo(result);return result;}
                 if (kind == Kind.IMAGE || kind == Kind.PDF) {
-                    if (result.size > MAX_DOCUMENT_BYTES) throw new PreviewLimit("Files larger than 128 MiB need another app. Use Open to continue.");
+                    if (result.size > MAX_DOCUMENT_BYTES) throw new PreviewLimit("Files larger than 128 MiB need another app.");
                     if (kind == Kind.IMAGE) decodeImage(file, result); else renderPdf(file, result,wantedPage);
                 } else if (kind == Kind.SVG) {
                     try(ParcelFileDescriptor.AutoCloseInputStream input=new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))){
@@ -1436,55 +2650,89 @@ public final class FileViewerActivity extends Activity {
                 } else if (kind == Kind.TEXT || kind==Kind.MARKDOWN || kind==Kind.HTML) {
                     try (ParcelFileDescriptor.AutoCloseInputStream input = new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) { result.text = PreviewText.read(input); }
                     checkCancelled();if(kind==Kind.MARKDOWN)result.formatted=RichText.markdown(result.text.text);else if(kind==Kind.HTML)result.formatted=RichText.html(result.text.text);
+                } else if (kind == Kind.OFFICE) {
+                    try (ParcelFileDescriptor.AutoCloseInputStream input = new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) {
+                        result.office = OfficePreview.read(input.getChannel(),OfficePreview.format(sourceName));
+                    }
                 } else if (kind == Kind.ZIP) {
                     try (ParcelFileDescriptor.AutoCloseInputStream input = new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) { result.archive = ZipDirectory.read(input.getChannel()); }
-                } else { result.media = file; file = null; }
+                } else if (kind == Kind.SEVEN_Z) {
+                    try (ParcelFileDescriptor.AutoCloseInputStream input =
+                                 new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) {
+                        result.sevenZip = SevenZipArchive.inspect(input.getChannel());
+                    }
+                } else if (kind == Kind.STREAM_ARCHIVE) {
+                    try (ParcelFileDescriptor.AutoCloseInputStream input =
+                                 new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) {
+                        StreamArchiveExtraction.Format format=StreamArchiveExtraction.format(sourceName);
+                        if(format==null)throw new IOException("Unrecognized archive format.");
+                        if(format.tar)result.tar=TarArchiveListing.read(input.getChannel(),format.gzip);
+                        else StreamArchiveExtraction.inspect(input.getChannel(),format);
+                    }
+                } else if (kind == Kind.APK) {
+                    result.apk = ApkInstallAction.inspect(context,file);
+                } else if (kind != Kind.DEX) { result.media = file; file = null; }
+                if(result.text!=null)result.code=CodeSyntax.model(sourceName,result.text.text,language);
                 checkCancelled();
                 if(file!=null){
                     if(!result.identity.equals(RootFileProvider.identity(Os.fstat(file.getFileDescriptor())))){throw new IOException("File changed while loading.");}
-                    if(preciseMetadata)CACHE.put(cacheKey,new PreviewData(result));
+                    if(preciseMetadata && kind!=Kind.APK && kind!=Kind.SEVEN_Z)CACHE.put(cacheKey,new PreviewData(result));
                 }
             } catch (StackOverflowError complex) {
-                result.close();result.error="This file is too complex to preview. Use Open to continue.";
+                result.close();result.error="This file is too complex to preview.";
             } catch (OutOfMemoryError exhausted) {
-                result.close(); result.error = "This file needs too much memory to preview. Use Open to choose another app.";
+                result.close(); result.error = "This file needs too much memory to preview.";
             } catch (SecurityException denied) {
-                result.close(); result.error = kind == Kind.PDF ? "This PDF is protected or cannot be rendered. Use Open to choose another app."
+                result.close(); result.error = kind == Kind.PDF ? "This PDF is protected or cannot be rendered."
                         : "File access expired or was denied. Return to results and open it again.";
             } catch (Exception failure) {
                 result.close();
-                if (failure instanceof PreviewLimit || (failure instanceof IOException && (kind == Kind.TEXT || kind == Kind.ZIP || kind==Kind.SVG || kind==Kind.MARKDOWN || kind==Kind.HTML)))
+                if (failure instanceof PreviewLimit || (failure instanceof IOException && (kind == Kind.TEXT || kind == Kind.OFFICE || kind == Kind.ZIP || kind == Kind.STREAM_ARCHIVE || kind == Kind.SEVEN_Z || kind == Kind.APK || kind==Kind.SVG || kind==Kind.MARKDOWN || kind==Kind.HTML)))
                     result.error = failure.getMessage();
-                else result.error = "Could not preview this file. It may have changed, or its format may be unsupported. Use Open to choose another app.";
-                if (result.error == null || result.error.length() > 240) result.error = "Could not read this file. Use Open to choose another app.";
+                else result.error = "Could not preview this file. It may have changed, or its format may be unsupported.";
+                if (result.error == null || result.error.length() > 240) result.error = "Could not read this file.";
             } finally { if (file != null) try { file.close(); } catch (IOException ignored) { }result.cpuNanos=android.os.Debug.threadCpuTimeNanos()-cpuStart; }
             return result;
         }
 
+        private static boolean looksLikeTransportStream(ParcelFileDescriptor file,long size) throws android.system.ErrnoException, IOException {
+            if(size<4L*188)return false;
+            byte[] header=new byte[(int)Math.min(size,5L*204)];
+            int read=Os.pread(file.getFileDescriptor(),header,0,header.length,0);
+            for(int packet:new int[]{188,192,204}){
+                int offset=packet==192?4:0;
+                if(read<=offset+3*packet)continue;
+                boolean sync=true;
+                for(int i=0;i<4;i++)if(header[offset+i*packet]!=0x47){sync=false;break;}
+                if(sync)return true;
+            }
+            return false;
+        }
+
         private void decodeImage(ParcelFileDescriptor file, PreviewResult result) throws Exception {
+            decodeImage(file,result,MAX_BITMAP_EDGE);
+        }
+
+        private void decodeImage(ParcelFileDescriptor file, PreviewResult result,int maxEdge) throws Exception {
             BitmapFactory.Options bounds = new BitmapFactory.Options(); bounds.inJustDecodeBounds = true;
             BitmapFactory.decodeFileDescriptor(file.getFileDescriptor(), null, bounds);
             checkCancelled();
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw new PreviewLimit("This image format is unsupported on this device. Use Open to choose another app.");
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw new PreviewLimit("This image format is unsupported on this device.");
             result.width = bounds.outWidth; result.height = bounds.outHeight;
-            try {
-                Os.lseek(file.getFileDescriptor(), 0, OsConstants.SEEK_SET);
-                ExifInterface exif = new ExifInterface(file.getFileDescriptor());
-                result.orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, 1);
-            } catch (IOException | RuntimeException unsupportedExif) { result.orientation = 1; }
+            result.orientation = ImageOrientation.read(file);
             checkCancelled(); Os.lseek(file.getFileDescriptor(), 0, OsConstants.SEEK_SET);
             BitmapFactory.Options options = new BitmapFactory.Options(); options.inPreferredConfig = Bitmap.Config.ARGB_8888; options.inScaled = false;
             options.inSampleSize = 1;
             while ((long) Math.ceil(bounds.outWidth / (double) options.inSampleSize) * (long) Math.ceil(bounds.outHeight / (double) options.inSampleSize) > MAX_BITMAP_PIXELS
-                    || Math.ceil(bounds.outWidth / (double) options.inSampleSize) > MAX_BITMAP_EDGE || Math.ceil(bounds.outHeight / (double) options.inSampleSize) > MAX_BITMAP_EDGE) {
+                    || Math.ceil(bounds.outWidth / (double) options.inSampleSize) > maxEdge || Math.ceil(bounds.outHeight / (double) options.inSampleSize) > maxEdge) {
                 if (options.inSampleSize > (1 << 28)) throw new PreviewLimit("This image is too large to preview.");
                 options.inSampleSize *= 2;
             }
             result.bitmap = BitmapFactory.decodeFileDescriptor(file.getFileDescriptor(), null, options);
             checkCancelled();
-            if (result.bitmap == null) throw new PreviewLimit("This image format is unsupported on this device. Use Open to choose another app.");
+            if (result.bitmap == null) throw new PreviewLimit("This image format is unsupported on this device.");
             if ((long) result.bitmap.getWidth() * result.bitmap.getHeight() > MAX_BITMAP_PIXELS
-                    || result.bitmap.getWidth() > MAX_BITMAP_EDGE || result.bitmap.getHeight() > MAX_BITMAP_EDGE
+                    || result.bitmap.getWidth() > maxEdge || result.bitmap.getHeight() > maxEdge
                     || result.bitmap.getAllocationByteCount() > MAX_BITMAP_PIXELS * 4L) throw new PreviewLimit("This image needs another app to preview.");
         }
 
@@ -1499,6 +2747,10 @@ public final class FileViewerActivity extends Activity {
     }
 
     private static void renderPdfPage(ParcelFileDescriptor file, PreviewResult result, int wantedPage) throws Exception {
+        renderPdfPage(file,result,wantedPage,MAX_PDF_EDGE);
+    }
+
+    private static void renderPdfPage(ParcelFileDescriptor file, PreviewResult result, int wantedPage,int maxEdge) throws Exception {
         // Older PdfRenderer constructors leave their input open on failure.
         try (ParcelFileDescriptor input = ParcelFileDescriptor.dup(file.getFileDescriptor());
              PdfRenderer renderer = new PdfRenderer(input)) {
@@ -1509,7 +2761,7 @@ public final class FileViewerActivity extends Activity {
             try (PdfRenderer.Page pdf = renderer.openPage(result.page)) {
                 int width = pdf.getWidth(), height = pdf.getHeight();
                 if (width <= 0 || height <= 0) throw new PreviewLimit("This PDF page cannot be rendered.");
-                float scale = Math.min(MAX_PDF_EDGE / (float) Math.max(width, height),
+                float scale = Math.min(maxEdge / (float) Math.max(width, height),
                         (float) Math.sqrt(MAX_BITMAP_PIXELS / ((double) width * height)));
                 int bitmapWidth = Math.max(1, (int) (width * scale)), bitmapHeight = Math.max(1, (int) (height * scale));
                 result.bitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);
@@ -1520,9 +2772,71 @@ public final class FileViewerActivity extends Activity {
         }
     }
 
+    // Inline previews use the same no-follow source and decoders, with smaller rendered images.
+    enum QuickKind { IMAGE, PDF, TEXT, AUDIO, VIDEO, UNSUPPORTED }
+    static QuickKind quickKind(String name) {
+        switch (kindFor(name,mimeFor(name))) {
+            case IMAGE: return QuickKind.IMAGE;
+            case PDF: return QuickKind.PDF;
+            case TEXT: case MARKDOWN: case HTML: return QuickKind.TEXT;
+            case AUDIO: return QuickKind.AUDIO;
+            case VIDEO: return QuickKind.VIDEO;
+            default: return QuickKind.UNSUPPORTED;
+        }
+    }
+    static final class InlineImage implements AutoCloseable {
+        final Bitmap bitmap;
+        final int orientation;
+        InlineImage(Bitmap bitmap,int orientation){this.bitmap=bitmap;this.orientation=orientation;}
+        @Override public void close(){if(!bitmap.isRecycled())bitmap.recycle();}
+    }
+    static Object readInline(Context context,FileEntry entry,boolean root,QuickKind format)throws Exception {
+        if(format==QuickKind.UNSUPPORTED)throw new IOException("Quick preview isn’t available for this file type.");
+        try(ParcelFileDescriptor file=SafeFileAccess.open(context,entry.path(),root)) {
+            long bytes=file.getStatSize();
+            if(bytes<0)throw new IOException("This file cannot be read here.");
+            if(format!=QuickKind.TEXT&&bytes>MAX_DOCUMENT_BYTES)
+                throw new IOException("This file is too large for quick preview.");
+            if(format==QuickKind.TEXT) {
+                try(ParcelFileDescriptor.AutoCloseInputStream input=
+                            new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) {
+                    PreviewText.Result text=PreviewText.read(input);
+                    String value=text.text;
+                    // The quick viewport scrolls. Keep an independent UI-layout budget.
+                    int end=Math.min(value.length(),12_000),lines=0;
+                    for(int i=0;i<end;i++) {
+                        char c=value.charAt(i);
+                        if((c=='\n'||c=='\r'&&(i+1>=end||value.charAt(i+1)!='\n'))&&++lines>=180){
+                            end=i;break;
+                        }
+                    }
+                    if(end<value.length()&&end>0&&Character.isHighSurrogate(value.charAt(end-1)))end--;
+                    boolean partial=text.truncated||end<value.length();
+                    return (end==value.length()?value:value.substring(0,end))
+                            +(partial?"\n\nPreview shortened. Open to read more.":"");
+                }
+            }
+            String identity=RootFileProvider.identity(Os.fstat(file.getFileDescriptor()));
+            try(PreviewResult result=new PreviewResult()) {
+                if(format==QuickKind.PDF) renderPdfPage(file,result,0,960);
+                else if(format==QuickKind.IMAGE) {
+                    PreviewJob worker=new PreviewJob(null,context,null,Kind.IMAGE,0,0);
+                    worker.decodeImage(file,result,960);
+                } else throw new IOException("Select Play to preview audio or video.");
+                PreviewText.cancelled();
+                if(!identity.equals(RootFileProvider.identity(Os.fstat(file.getFileDescriptor()))))
+                    throw new IOException("The file changed. Reopen it to preview.");
+                InlineImage image=new InlineImage(result.bitmap,result.orientation);
+                result.bitmap=null;
+                return image;
+            }
+        }
+    }
+
     /** Codec/descriptor checks without launching an Activity or touching a user's files. */
     static PreviewCheck checkForProbe(Context context, Uri uri, String name, int page) {
         PreviewJob task = new PreviewJob(null, context.getApplicationContext(), uri, kindFor(name, mimeFor(name)), page, 0);
+        task.sourceName = name;
         try (PreviewResult result = task.read()) { return new PreviewCheck(result); }
     }
     static final class PreviewCheck {

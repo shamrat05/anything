@@ -53,6 +53,91 @@ final class ThumbnailStore {
         java.util.Set<String> prefixes=new java.util.HashSet<>();for(String path:paths)prefixes.add(hash(path));
         synchronized(DISK){File[] files=folder(context).listFiles();if(files!=null)for(File file:files){String name=file.getName();if(name.length()>64&&prefixes.contains(name.substring(0,64)))discard(file);}}
     }
+    private static final java.util.regex.Pattern GENERATED=java.util.regex.Pattern.compile("[0-9a-f]{64}-[0-9a-f]{64}[.]thumb");
+
+    static final class CacheReview {
+        private final java.nio.file.Path root;
+        private final Object directoryKey;
+        final java.util.Map<String,java.nio.file.attribute.BasicFileAttributes> entries;
+        final long bytes;
+        final int skipped;
+        private CacheReview(java.nio.file.Path root,Object directoryKey,
+                            java.util.Map<String,java.nio.file.attribute.BasicFileAttributes> entries,long bytes,int skipped){
+            this.root=root;this.directoryKey=directoryKey;this.entries=java.util.Collections.unmodifiableMap(entries);
+            this.bytes=bytes;this.skipped=skipped;
+        }
+    }
+    static final class CacheReceipt {
+        int removed,skipped;
+        long bytes;
+    }
+    static CacheReview reviewCache(Context context){
+        synchronized(DISK){
+            java.util.Map<String,java.nio.file.attribute.BasicFileAttributes> entries=new java.util.LinkedHashMap<>();
+            java.nio.file.Path root=folder(context).toPath();
+            Object key=null;long bytes=0;int skipped=0;
+            try{
+                if(java.nio.file.Files.notExists(root,java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                    return new CacheReview(root,null,entries,0,0);
+                root=confirmedCachePath(context);
+                key=directCacheKey(root);
+                try(java.nio.file.DirectoryStream<java.nio.file.Path> files=java.nio.file.Files.newDirectoryStream(root)){
+                    for(java.nio.file.Path path:files){
+                        if(!GENERATED.matcher(path.getFileName().toString()).matches())continue;
+                        if(entries.size()==1600){skipped++;break;}
+                        try{
+                            java.nio.file.attribute.BasicFileAttributes attrs=cacheAttributes(path);
+                            if(!attrs.isRegularFile()||attrs.fileKey()==null){skipped++;continue;}
+                            entries.put(path.getFileName().toString(),attrs);bytes+=attrs.size();
+                        }catch(java.io.IOException|SecurityException inaccessible){skipped++;}
+                    }
+                }
+            }catch(java.io.IOException|RuntimeException unavailable){skipped++;}
+            return new CacheReview(root,key,entries,bytes,skipped);
+        }
+    }
+    static CacheReceipt clearReviewedCache(Context context,CacheReview review){
+        CacheReceipt receipt=new CacheReceipt();
+        receipt.skipped=review.skipped;
+        synchronized(DISK){
+            try{
+                java.nio.file.Path root=confirmedCachePath(context);
+                if(!root.equals(review.root)||review.directoryKey==null||!review.directoryKey.equals(directCacheKey(root))){
+                    receipt.skipped+=review.entries.size();return receipt;
+                }
+                for(java.util.Map.Entry<String,java.nio.file.attribute.BasicFileAttributes> row:review.entries.entrySet()){
+                    // The app's writes and deletion share DISK. Recheck the reviewed generation;
+                    // do not touch new files, links, stale paths, or unrecognized cache entries.
+                    java.nio.file.Path path=root.resolve(row.getKey());
+                    try{
+                        java.nio.file.attribute.BasicFileAttributes old=row.getValue(),current=cacheAttributes(path);
+                        if(!current.isRegularFile()||!old.fileKey().equals(current.fileKey())||old.size()!=current.size()
+                                ||!old.lastModifiedTime().equals(current.lastModifiedTime())){
+                            receipt.skipped++;continue;
+                        }
+                        java.nio.file.Files.delete(path);receipt.removed++;receipt.bytes+=current.size();
+                    }catch(java.io.IOException|SecurityException changed){receipt.skipped++;}
+                }
+                diskBytes=-1;
+                diskCount=0;
+            }catch(java.io.IOException|RuntimeException inaccessible){receipt.skipped+=review.entries.size();}
+        }
+        return receipt;
+    }
+    private static java.nio.file.Path confirmedCachePath(Context context)throws java.io.IOException{
+        // Android can expose the same private cache parent using a system-controlled alias.
+        return context.getCacheDir().getCanonicalFile().toPath().resolve(".thumbnails-v2");
+    }
+    private static Object directCacheKey(java.nio.file.Path root)throws java.io.IOException{
+        java.nio.file.attribute.BasicFileAttributes attrs=cacheAttributes(root);
+        if(!attrs.isDirectory()||attrs.fileKey()==null||!root.toRealPath().equals(root))
+            throw new java.io.IOException("Generated cache is not a direct directory.");
+        return attrs.fileKey();
+    }
+    private static java.nio.file.attribute.BasicFileAttributes cacheAttributes(java.nio.file.Path path)throws java.io.IOException{
+        return java.nio.file.Files.readAttributes(path,java.nio.file.attribute.BasicFileAttributes.class,
+                java.nio.file.LinkOption.NOFOLLOW_LINKS);
+    }
     private static String hash(String value){try{byte[] digest=MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));char[] hex=new char[digest.length*2],digits="0123456789abcdef".toCharArray();for(int i=0;i<digest.length;i++){hex[i*2]=digits[(digest[i]&255)>>>4];hex[i*2+1]=digits[digest[i]&15];}return new String(hex);}catch(java.security.NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}}
     private ThumbnailStore(){}
 }

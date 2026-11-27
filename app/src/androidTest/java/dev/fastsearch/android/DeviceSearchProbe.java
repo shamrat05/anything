@@ -29,13 +29,19 @@ public final class DeviceSearchProbe extends Instrumentation {
     private int checks;
     private final StringBuilder report = new StringBuilder();
 
-    @Override public void onCreate(Bundle args) { super.onCreate(args); start(); }
+    private boolean syntheticOnly;
+    @Override public void onCreate(Bundle args) {
+        super.onCreate(args);
+        syntheticOnly = args != null && "true".equals(args.getString("syntheticOnly"));
+        start();
+    }
     @Override public void onStart() {
         Bundle result = new Bundle();
         boolean passed = false;
         try {
-            appChecks();
+            if (!syntheticOnly) appChecks();
             if (Build.VERSION.SDK_INT >= 29) syntheticChecks();
+            else if (syntheticOnly) throw new AssertionError("Synthetic resolver checks require API 29");
             else report.append("Synthetic resolver checks require API 29.\n");
             passed = true;
         } catch (Throwable failure) {
@@ -109,7 +115,24 @@ public final class DeviceSearchProbe extends Instrumentation {
                     "client caps duplicate provider rows even when provider ignores limit");
             provider.manyPhoneRows = false;
 
+            provider.bulkContacts=4230;
+            java.util.Set<String> contactIds=new java.util.HashSet<>();String next=null;int contactPages=0;
+            do{DeviceSearch.Page page=search.page("",DeviceSearch.CONTACTS,next,new CancellationSignal());
+                check(page.results.size()<=100,"contact page stays bounded");for(DeviceSearch.Result row:page.results)check(contactIds.add(row.id),"contact pages never repeat a contact");
+                next=page.next;if(++contactPages>100)throw new AssertionError("Contact cursor did not advance");}while(next!=null);
+            check(contactIds.size()==4232&&contactPages>40,"all 4232 synthetic contacts reachable beyond 100 and 2000, including name-only contacts");
+            provider.bulkContacts=0;
             context.sms = true;
+            if(!BuildConfig.SMS_ENABLED){
+                int beforeSmsQueries=provider.queries;
+                check(!DeviceSearch.hasSms(context),"Standard cannot acquire SMS capability");
+                check(search.search("fixture",DeviceSearch.SMS,null).isEmpty(),
+                        "Standard returns no SMS results even with a permissive fixture");
+                check(search.page("fixture",DeviceSearch.SMS,null,new CancellationSignal()).results.isEmpty(),
+                        "Standard cannot page SMS results");
+                check(provider.queries==beforeSmsQueries,"Standard never queried the synthetic SMS provider");
+                return;
+            }
             provider.addSms(1, "+100", "Fixture literal 50%_\\' body", 1);
             provider.addSms(2, "+200", "Fixture literal 50ABz' body", 2);
             List<DeviceSearch.Result> sms = search.search("50%_\\'", DeviceSearch.SMS, new CancellationSignal());
@@ -137,13 +160,6 @@ public final class DeviceSearchProbe extends Instrumentation {
             catch (OperationCanceledException expected) { stopped = true; }
             check(stopped && provider.closes == closed + 1, "cancellation while consuming closes the cursor");
             provider.cancelDuringMove = null;
-            provider.bulkContacts=4230;
-            java.util.Set<String> contactIds=new java.util.HashSet<>();String next=null;int contactPages=0;
-            do{DeviceSearch.Page page=search.page("",DeviceSearch.CONTACTS,next,new CancellationSignal());
-                check(page.results.size()<=100,"contact page stays bounded");for(DeviceSearch.Result row:page.results)check(contactIds.add(row.id),"contact pages never repeat a contact");
-                next=page.next;if(++contactPages>100)throw new AssertionError("Contact cursor did not advance");}while(next!=null);
-            check(contactIds.size()==4232&&contactPages>40,"all 4232 synthetic contacts reachable beyond 100 and 2000, including name-only contacts");
-            provider.bulkContacts=0;
             for(int i=121;i<=521;i++)provider.addSms(i,"+100","Fixture body",i);
             java.util.Set<String> messageIds=new java.util.HashSet<>();next=null;int messagePages=0;
             do{DeviceSearch.Page page=search.page("Fixture",DeviceSearch.SMS,next,new CancellationSignal());check(page.results.size()<=100,"SMS page stays bounded");

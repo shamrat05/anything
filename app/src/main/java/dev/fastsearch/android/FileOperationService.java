@@ -23,6 +23,7 @@ import org.json.JSONObject;
 public final class FileOperationService extends Service {
     private static final String CANCEL = "dev.fastsearch.android.CANCEL_FILE_OPERATION";
     private static final String DESTINATION = "destination";
+    private static final String DIRECT_TRANSFER = "directTransfer";
     private static final int NOTIFICATION = 2;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final CopyOnWriteArrayList<WeakReference<Listener>> LISTENERS = new CopyOnWriteArrayList<>();
@@ -30,6 +31,7 @@ public final class FileOperationService extends Service {
     private static final AtomicBoolean BUSY = new AtomicBoolean();
     private static volatile State state = new State(false, false, 0, 0, "", "");
     private static volatile FileOperationProcess active;
+    private static final java.util.concurrent.atomic.AtomicReference<FileClipboard.Snapshot> PENDING_TRANSFER=new java.util.concurrent.atomic.AtomicReference<>();
     private static final java.util.concurrent.atomic.AtomicReference<FileClipboard.Snapshot> PENDING_DELETE=new java.util.concurrent.atomic.AtomicReference<>();
     private static final java.util.concurrent.atomic.AtomicReference<RenameRequest> PENDING_RENAME=new java.util.concurrent.atomic.AtomicReference<>();
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -84,12 +86,34 @@ public final class FileOperationService extends Service {
         }
     }
 
+    /** Transfer this confirmed selection without touching the user's persistent clipboard. */
+    static synchronized void transfer(Context context,String destination,FileClipboard.Snapshot snapshot)throws IOException{
+        FileOperationWorker.requirePath(destination);
+        if(snapshot==null||snapshot.entries.length()==0)throw new IOException("Select files or folders first.");
+        if(state.running||!BUSY.compareAndSet(false,true))throw new IOException("A file operation is already running.");
+        CANCEL_REQUESTED.set(false);PENDING_TRANSFER.set(snapshot);
+        publish(new State(true,false,0,snapshot.entries.length(),"Preparing file operation",""));
+        try{
+            context.getApplicationContext().startForegroundService(new Intent(context,FileOperationService.class)
+                    .putExtra(DIRECT_TRANSFER,true).putExtra(DESTINATION,destination));
+        }catch(RuntimeException error){
+            PENDING_TRANSFER.set(null);BUSY.set(false);
+            publish(new State(false,false,0,snapshot.entries.length(),"File operation did not start","Android could not start file operations."));
+            throw new IOException("Android could not start file operations.",error);
+        }
+    }
+
     static synchronized void delete(Context context,FileClipboard.Snapshot snapshot)throws IOException{
         if(state.running||!BUSY.compareAndSet(false,true))throw new IOException("A file operation is already running.");
         CANCEL_REQUESTED.set(false);PENDING_DELETE.set(snapshot);
         publish(new State(true,false,0,snapshot.entries.length(),"Preparing deletion",""));
         try{context.getApplicationContext().startForegroundService(new Intent(context,FileOperationService.class).putExtra("delete",true));}
         catch(RuntimeException failure){PENDING_DELETE.set(null);BUSY.set(false);publish(new State(false,false,0,snapshot.entries.length(),"Deletion did not start","Android could not start deletion."));throw new IOException("Android could not start deletion.",failure);}
+    }
+
+    private static String deletionFailure(int completed,int total,String details){
+        return "Deleted "+completed+" of "+total+" items. "
+                +(details==null||details.isEmpty()?"The deletion did not finish.":details);
     }
 
     private static final class RenameRequest {
@@ -143,13 +167,16 @@ public final class FileOperationService extends Service {
         String destination = intent.getStringExtra(DESTINATION);
         FileClipboard.Snapshot deletion=intent.getBooleanExtra("delete",false)?PENDING_DELETE.getAndSet(null):null;
         RenameRequest renaming=intent.getBooleanExtra("rename",false)?PENDING_RENAME.getAndSet(null):null;
-        worker.execute(() -> perform(destination,deletion,renaming));
+        boolean direct=intent.getBooleanExtra(DIRECT_TRANSFER,false);
+        FileClipboard.Snapshot transfer=direct?PENDING_TRANSFER.getAndSet(null):null;
+        worker.execute(() -> perform(destination,deletion,renaming,direct,transfer));
         return START_NOT_STICKY;
     }
 
-    private void perform(String destination,FileClipboard.Snapshot deletion,RenameRequest renaming) {
+    private void perform(String destination,FileClipboard.Snapshot deletion,RenameRequest renaming,
+                         boolean direct,FileClipboard.Snapshot transfer) {
         boolean deleting=deletion!=null;
-        FileClipboard.Snapshot clipboard = deleting?deletion:renaming!=null?renaming.snapshot:FileClipboard.read(this);
+        FileClipboard.Snapshot clipboard = deleting?deletion:renaming!=null?renaming.snapshot:direct?transfer:FileClipboard.read(this);
         JSONArray committed = new JSONArray();
         boolean changed = false;
         int total = clipboard == null ? 0 : clipboard.entries.length();
@@ -187,7 +214,9 @@ public final class FileOperationService extends Service {
                 boolean stopped = result.optBoolean("cancelled") || CANCEL_REQUESTED.get();
                 String status = result.optBoolean("ok") ? (deleting?"Deleted ":renaming!=null?"Renamed ":move ? "Moved " : "Copied ") + done + " items"
                         : (stopped ? "Stopped after " : "Finished ") + done + " of " + total + " items";
-                outcome = new State(false, stopped, done, total, status, result.optBoolean("ok") ? "" : result.optString("error", "File operation failed."));
+                String error=result.optBoolean("ok") ? "" : result.optString("error", "File operation failed.");
+                outcome = new State(false, stopped, done, total, status, deleting&&!error.isEmpty()
+                        ? deletionFailure(done,total,error):error);
             } finally {
                 // Progress acknowledgements remain useful if a helper exits without a final record.
                 if (committed.length() == 0 && progressIndices[0].length() != 0) committed = progressIndices[0];
@@ -195,10 +224,11 @@ public final class FileOperationService extends Service {
         } catch (Exception failure) {
             String error = failure instanceof IOException ? failure.getMessage() : "File operation failed. Refresh and try again.";
             outcome = new State(false, CANCEL_REQUESTED.get(), committed.length(), total,
-                    CANCEL_REQUESTED.get() ? "File operation stopped" : "File operation failed", error == null ? "File operation failed." : error);
+                    CANCEL_REQUESTED.get() ? "File operation stopped" : "File operation failed",
+                    deleting?deletionFailure(committed.length(),total,error):error == null ? "File operation failed." : error);
         } finally {
             active = null;
-            if (clipboard != null){if(deleting||renaming!=null)FileClipboard.deleted(this,clipboard,committed);else FileClipboard.completed(this, clipboard, committed);}
+            if (clipboard != null){if(deleting||renaming!=null)FileClipboard.deleted(this,clipboard,committed);else if(!direct)FileClipboard.completed(this, clipboard, committed);}
             if (changed || committed.length() != 0) {
                 update(true, CANCEL_REQUESTED.get(), committed.length(), total, "Updating file index", "");
                 try { java.util.List<String> paths;
@@ -211,7 +241,9 @@ public final class FileOperationService extends Service {
                     if(failure instanceof InterruptedException)Thread.currentThread().interrupt();
                     State previous=outcome;
                     outcome=new State(false,CANCEL_REQUESTED.get(),committed.length(),total,
-                            previous==null?"File operation finished":previous.status,"File changes could not be saved. Refresh to retry.");
+                            previous==null?"File operation finished":previous.status,deleting
+                                    ? deletionFailure(committed.length(),total,"Could not update the index. Refresh to see the current files.")
+                                    : "File changes could not be saved. Refresh to retry.");
                 }
             }
             // Final listeners may read the clipboard, so publish only after its

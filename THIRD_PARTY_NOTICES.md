@@ -12,6 +12,10 @@ The project [MIT license](LICENSE) applies to the independently written Android 
 
 The query engine includes unmodified RE2/J **1.8**, distributed under its Go BSD-style license. [third_party/re2j/LICENSE](third_party/re2j/LICENSE) retains the original notice; the same bytes are packaged in the APK under `assets/licenses/re2j-LICENSE.txt`. Artifact hashes, original Maven/upstream URLs and the guarded matching APIs are recorded in [third_party/re2j/README.md](third_party/re2j/README.md).
 
+## Inter
+
+The app includes unmodified static fonts from [Inter 4.1](https://github.com/rsms/inter/releases/tag/v4.1), distributed under the SIL Open Font License 1.1. The original copyright and full license are shipped in `assets/licenses/Inter-OFL.txt`.
+
 ## Test photographs
 
 Only the instrumentation APK and store screenshots use NASA sample images. They are not bundled in the production APK or AAB. Retrieved 2026-10-21 from the NASA Image and Video Library:
@@ -29,3 +33,7 @@ CommonMark Java 0.24.0 and its GFM tables extension are unmodified Maven artifac
 AndroidSVG 1.4 is an unmodified Maven artifact under the Apache License 2.0. Original sources: https://github.com/BigBadaboom/androidsvg and https://repo.maven.apache.org/maven2/com/caverock/androidsvg/1.4/. The original license is retained in `third_party/androidsvg/LICENSE.txt` and packaged under `assets/licenses/androidsvg-LICENSE.txt`. Vector rendering is bounded and disables external resource loading.
 
 Retrieved 28 October 2026. Exact JAR digests are in `third_party/preview-sha256.txt`, checked by `scripts/check.sh`.
+
+## Read-only DEX inspection
+
+The Smali viewer uses Google's unmodified [Smali 3.0.9](https://github.com/google/smali/tree/3.0.9) libraries (baksmali, dexlib2 and util) from Google Maven. The upstream notices are shipped in `assets/licenses/google-smali-LICENSE.txt`. Google Maven's Android build of [Guava 31.1](https://github.com/google/guava/tree/v31.1) is a runtime dependency; its Apache License 2.0 text is shipped in `assets/licenses/guava-LICENSE.txt`. The command-line tools are not exposed by the app.

@@ -3,11 +3,9 @@ package dev.fastsearch.android;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.drawable.Drawable;
 import android.graphics.pdf.PdfRenderer;
-import android.media.ExifInterface;
 import android.media.MediaMetadataRetriever;
 import android.os.Build;
 import android.os.Handler;
@@ -15,7 +13,6 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.system.Os;
 import android.system.OsConstants;
-import android.util.LruCache;
 import android.widget.ImageView;
 import dev.fastsearch.core.FileEntry;
 import java.lang.ref.WeakReference;
@@ -38,8 +35,8 @@ final class ThumbnailLoader implements AutoCloseable {
     private final java.util.concurrent.atomic.AtomicInteger sourceDecodes=new java.util.concurrent.atomic.AtomicInteger(),diskHits=new java.util.concurrent.atomic.AtomicInteger();
     ThumbnailLoader(Context context){this.context=context.getApplicationContext();ThumbnailStore.register(this.context);workers.allowCoreThreadTimeOut(true);}
     private static final class Request {
-        final String key,packageName;final FileEntry entry;final int edge;final boolean root,pdf,fitted;
-        Request(String key,FileEntry entry,int edge,boolean root,boolean pdf,boolean fitted,String packageName){this.key=key;this.entry=entry;this.edge=edge;this.root=root;this.pdf=pdf;this.fitted=fitted;this.packageName=packageName;}
+        final String key,packageName;final FileEntry entry;final int edge;final boolean root,pdf,fitted,archive;
+        Request(String key,FileEntry entry,int edge,boolean root,boolean pdf,boolean fitted,boolean archive,String packageName){this.key=key;this.entry=entry;this.edge=edge;this.root=root;this.pdf=pdf;this.fitted=fitted;this.archive=archive;this.packageName=packageName;}
     }
     void bind(ImageView view,FileEntry entry,int edge,boolean root){bind(view,entry,edge,root,false);}
     void bindPreview(ImageView view,FileEntry entry,int edge,boolean root){bind(view,entry,edge,root,true);}
@@ -48,29 +45,33 @@ final class ThumbnailLoader implements AutoCloseable {
         float density=context.getResources().getDisplayMetrics().density;
         String extension=entry.directory?"":FileSubtypes.extension(entry);
         boolean pdf=(fitted||edge>=80*density)&&extension.equals("pdf"),svg=extension.equals("svg")||extension.equals("svgz");
-        if(!closed&&(category==6||category==7||pdf||svg)){
-            watch(view);boolean fit=fitted||pdf||svg;
+        boolean apk=ArchiveAppIcon.supports(entry);
+        if(apk)bucket=128;
+        if(!closed&&(category==6||category==7||pdf||svg||apk)){
+            watch(view);boolean fit=fitted||pdf||svg||apk;
             String key=entry.path()+'\0'+entry.modified+':'+entry.size+':'+root+':'+bucket;
             boolean same=key.equals(view.getTag());view.setTag(key);
             Request previous = bindings.get(view);
             if (previous == null || !previous.key.equals(key) || previous.fitted != fit)
-                bindings.put(view,new Request(key,entry,bucket,root,pdf,fit,null));
+                bindings.put(view,new Request(key,entry,bucket,root,pdf,fit,apk,null));
             if(same&&view.getDrawable() instanceof android.graphics.drawable.BitmapDrawable){view.setScaleType(fit?ImageView.ScaleType.FIT_CENTER:ImageView.ScaleType.CENTER_CROP);viewportChanged();return;}
             Bitmap cached=ThumbnailStore.get(key);if(cached!=null){apply(view,cached,fit);viewportChanged();return;}
             viewportChanged();
         }else {view.setTag(null);if(bindings.remove(view)!=null)viewportChanged();}
         int iconEdge=Math.max(Math.round(24*density),Math.min(Math.round(64*density),Math.round(edge*.6f)));
-        int placeholder=category*4096+iconEdge;
-        if(Integer.valueOf(placeholder).equals(view.getTag(R.id.thumbnail_placeholder)))return;
+        int resource=UiTheme.fileIcon(context,category,extension);
+        long placeholder=((long)resource<<32)|iconEdge;
+        if(Long.valueOf(placeholder).equals(view.getTag(R.id.thumbnail_placeholder)))return;
         view.setTag(R.id.thumbnail_placeholder,placeholder);
-        view.setImageTintList(android.content.res.ColorStateList.valueOf(UiTheme.fileColor(context,category)));
-        Drawable icon=context.getDrawable(FileTypes.ICONS[category]);android.graphics.drawable.LayerDrawable sized=new android.graphics.drawable.LayerDrawable(new Drawable[]{icon});
+        view.setImageTintList(UiTheme.fileTint(context,category));
+        Drawable icon=context.getDrawable(resource);android.graphics.drawable.LayerDrawable sized=new android.graphics.drawable.LayerDrawable(new Drawable[]{icon});
         sized.setLayerSize(0,iconEdge,iconEdge);
         view.setImageDrawable(sized);view.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
     }
     void bindApp(ImageView view,String packageName){if(closed)return;watch(view);String key="app:"+packageName;boolean same=key.equals(view.getTag());view.setTag(key);
-        bindings.put(view,new Request(key,null,128,false,false,false,packageName));Bitmap cached=ThumbnailStore.get(key);
-        if(cached!=null)apply(view,cached,false);else if(!same)view.setImageResource(R.drawable.ic_app);viewportChanged();}
+        bindings.put(view,new Request(key,null,128,false,false,true,false,packageName));Bitmap cached=ThumbnailStore.get(key);
+        if(cached!=null)apply(view,cached,true);else if(!same){view.setTag(R.id.thumbnail_placeholder,null);view.setImageResource(UiTheme.fileIcon(context,9));view.setImageTintList(UiTheme.fileTint(context,9));view.setScaleType(ImageView.ScaleType.CENTER_INSIDE);}viewportChanged();}
+    void clearBinding(ImageView view){view.setTag(null);if(bindings.remove(view)!=null)viewportChanged();}
     private static final class Watch implements android.view.View.OnAttachStateChangeListener,android.view.View.OnLayoutChangeListener {
         final WeakReference<ThumbnailLoader> owner;Watch(ThumbnailLoader loader){owner=new WeakReference<>(loader);}
         void changed(){ThumbnailLoader loader=owner.get();if(loader!=null)loader.viewportChanged();}
@@ -105,11 +106,12 @@ final class ThumbnailLoader implements AutoCloseable {
         @Override public void run(){synchronized(this){if(cancelled||closed)return;running=Thread.currentThread();}
             Bitmap bitmap=null;boolean decoded=false;
             try{if(stopped())return;bitmap=ThumbnailStore.get(request.key);
-                if(bitmap==null&&request.entry!=null){bitmap=ThumbnailStore.read(context,request.key);if(bitmap!=null)diskHits.incrementAndGet();}
+                if(bitmap==null&&request.entry!=null&&!request.archive){bitmap=ThumbnailStore.read(context,request.key);if(bitmap!=null)diskHits.incrementAndGet();}
                 if(bitmap==null&&!stopped()){
                     sourceDecodes.incrementAndGet();decoded=true;
-                    if(request.entry!=null)bitmap=decode(request.entry,request.edge,request.root,request.pdf,signal);
-                    else{Drawable icon=context.getPackageManager().getApplicationIcon(request.packageName);bitmap=Bitmap.createBitmap(128,128,Bitmap.Config.ARGB_8888);icon.setBounds(0,0,128,128);icon.draw(new Canvas(bitmap));}
+                    if(request.archive)bitmap=ArchiveAppIcon.load(context,request.entry,request.edge,request.root,signal);
+                    else if(request.entry!=null)bitmap=decode(request.entry,request.edge,request.root,request.pdf,signal);
+                    else bitmap=ArchiveAppIcon.bitmap(context.getPackageManager().getApplicationIcon(request.packageName),request.edge);
                 }
                 // A native decoder may finish after its cell leaves the viewport. Reuse that
                 // completed work in bounded memory; cancellation still skips disk compression.
@@ -121,7 +123,7 @@ final class ThumbnailLoader implements AutoCloseable {
                     for(java.util.Map.Entry<ImageView,Request> item:bindings.entrySet())if(request.key.equals(item.getValue().key)&&visible(item.getKey(),item.getValue()))apply(item.getKey(),result,item.getValue().fitted);
                     viewportChanged();
                 });
-                if(decoded&&bitmap!=null&&request.entry!=null&&!stopped())ThumbnailStore.write(context,request.key,bitmap);
+                if(decoded&&bitmap!=null&&request.entry!=null&&!request.archive&&!stopped())ThumbnailStore.write(context,request.key,bitmap);
             }catch(Exception|OutOfMemoryError failure){main.post(()->{if(jobs.get(request.key)==this)jobs.remove(request.key);if(!closed&&!cancelled){unavailable.put(request.key,android.os.SystemClock.uptimeMillis());viewportChanged();}});}
             finally{synchronized(this){running=null;}}
         }
@@ -187,11 +189,7 @@ final class ThumbnailLoader implements AutoCloseable {
             options.inSampleSize = sample;
             options.inJustDecodeBounds = false;
             options.inPreferredConfig = Bitmap.Config.RGB_565;
-            int orientation = 1;
-            try {
-                Os.lseek(file.getFileDescriptor(), 0, OsConstants.SEEK_SET);
-                orientation = new ExifInterface(file.getFileDescriptor()).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1);
-            } catch (java.io.IOException | RuntimeException unsupportedExif) { /* Some formats carry no EXIF. */ }
+            int orientation = ImageOrientation.read(file);
             Os.lseek(file.getFileDescriptor(), 0, OsConstants.SEEK_SET);
             Bitmap bitmap = BitmapFactory.decodeFileDescriptor(file.getFileDescriptor(), null, options);
             if(bitmap!=null&&Math.max(bitmap.getWidth(),bitmap.getHeight())>edge){float scale=edge/(float)Math.max(bitmap.getWidth(),bitmap.getHeight());

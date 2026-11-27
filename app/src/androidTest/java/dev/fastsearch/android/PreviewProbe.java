@@ -90,13 +90,13 @@ public final class PreviewProbe extends Instrumentation {
         FileViewerActivity.PreviewCheck boundedText = inspect(issue(longText), "bounded.txt", 0);
         check(boundedText.error == null && boundedText.truncated && boundedText.text.length() <= PreviewText.MAX_CHARACTERS, "text preview bound");
 
-        File archive = new File(fixture, "entries.apk");
+        File archive = new File(fixture, "entries.zip");
         try (ZipOutputStream out = new ZipOutputStream(new FileOutputStream(archive))) {
             out.putNextEntry(new ZipEntry("../label-only\nsnow 雪.txt")); out.write(new byte[1024 * 1024]); out.closeEntry();
             out.putNextEntry(new ZipEntry("folder/")); out.closeEntry();
         }
-        Uri zipUri = issue(archive); FileViewerActivity.PreviewCheck zipped = inspect(zipUri, "entries.apk", 0);
-        check(zipped.error == null && zipped.archiveEntries == 2, "ZIP/APK metadata through provider descriptor");
+        Uri zipUri = issue(archive); FileViewerActivity.PreviewCheck zipped = inspect(zipUri, "entries.zip", 0);
+        check(zipped.error == null && zipped.archiveEntries == 2, "ZIP metadata through provider descriptor");
         File media = new File(fixture, "descriptor.wav"); write(media, new byte[64]); Uri mediaUri = issue(media);
         check(inspect(mediaUri, "descriptor.wav", 0).mediaDescriptor, "media descriptor transfer closes after the check");
 
@@ -108,7 +108,7 @@ public final class PreviewProbe extends Instrumentation {
         int before = descriptors();
         for (int i = 0; i < 12; i++) {
             check(inspect(pdfUri, "pages.pdf", i % 3).error == null, "repeated PDF renderer cleanup");
-            check(inspect(zipUri, "entries.apk", 0).error == null, "repeated archive stream cleanup");
+            check(inspect(zipUri, "entries.zip", 0).error == null, "repeated archive stream cleanup");
             check(inspect(mediaUri, "descriptor.wav", 0).mediaDescriptor, "repeated media descriptor cleanup");
             check(inspect(corruptUri, "corrupt.pdf", 0).error != null, "repeated failure cleanup");
         }

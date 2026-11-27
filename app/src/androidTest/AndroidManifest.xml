@@ -16,4 +16,26 @@
     <instrumentation android:name="dev.fastsearch.android.RenamePreviewProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
     <instrumentation android:name="dev.fastsearch.android.ThumbnailEfficiencyProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
     <instrumentation android:name="dev.fastsearch.android.HelpProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.PeopleIconsProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.ApkInstallProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.DexViewerProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.ExternalOpenProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <application>
+        <activity android:name="dev.fastsearch.android.ExternalOpenReceiver" android:label="Anything Synthetic Receiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="text/plain" />
+                <data android:mimeType="image/png" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+        </activity>
+    </application>
+    <instrumentation android:name="dev.fastsearch.android.WidgetProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.BrandProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.SelectionMarksProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.AppOwnerBadgeProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.CleanerSheetProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
+    <instrumentation android:name="dev.fastsearch.android.ComparisonProbe" android:targetPackage="${testedApplicationId}" android:functionalTest="true" />
 </manifest>

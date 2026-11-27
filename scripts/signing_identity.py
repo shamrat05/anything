@@ -1,0 +1,3 @@
+"""Pinned public APK signing certificate (SHA-256 of DER)."""
+
+PUBLISHED_CERT = "55625f2224949490490db32296559058abd4e28e1b812b6e4d194d304400e612"

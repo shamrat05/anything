@@ -6,6 +6,7 @@
     <item type="id" name="results" />
     <item type="id" name="status" />
     <item type="id" name="result_section" />
+    <item type="id" name="grid_select" />
     <item type="id" name="storage_mode" />
     <item type="id" name="refresh" />
     <item type="id" name="category" />
@@ -19,6 +20,9 @@
     <item type="id" name="selection_bar" />
     <item type="id" name="selection_count" />
     <item type="id" name="file_icon" />
+    <item type="id" name="app_owner_badge" />
+    <item type="id" name="app_owner_binding" />
+    <item type="id" name="file_selection_mark" />
     <item type="id" name="paste" />
     <item type="id" name="delete" />
     <item type="id" name="preview_path" />
@@ -30,6 +34,13 @@
     <item type="id" name="preview_move" />
     <item type="id" name="preview_paste" />
     <item type="id" name="preview_delete" />
+    <item type="id" name="preview_delete_selected" />
+    <item type="id" name="preview_focus" />
+    <item type="id" name="preview_minimize" />
+    <item type="id" name="preview_reveal" />
+    <item type="id" name="preview_hex" />
+    <item type="id" name="preview_resume" />
+
     <item type="id" name="media_seek" />
     <item type="id" name="media_play" />
     <item type="id" name="media_speed" />
@@ -37,4 +48,7 @@
     <item type="id" name="media_brightness" />
     <item name="thumbnail_watch" type="id" />
     <item name="thumbnail_placeholder" type="id" />
+    <item name="preview_syntax" type="id" />
+    <item name="workspace_switcher" type="id" />
+    <item name="grid_mode_pill" type="id" />
 </resources>

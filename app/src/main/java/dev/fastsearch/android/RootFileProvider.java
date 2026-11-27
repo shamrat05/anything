@@ -11,12 +11,10 @@ import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
 import android.system.Os;
 import android.system.StructStat;
-import android.webkit.MimeTypeMap;
 import dev.fastsearch.core.FileEntry;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import org.json.JSONObject;
@@ -108,10 +106,7 @@ public final class RootFileProvider extends ContentProvider {
     }
 
     @Override public String getType(Uri uri) {
-        String name = uri.getLastPathSegment();
-        int dot = name == null ? -1 : name.lastIndexOf('.');
-        String type = dot < 0 ? null : MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substring(dot + 1).toLowerCase(Locale.ROOT));
-        return type == null ? "application/octet-stream" : type;
+        return ExternalFileActions.mimeFor(uri.getLastPathSegment());
     }
 
     @Override public Cursor query(Uri uri, String[] projection, String selection, String[] args, String sort) {
@@ -131,6 +126,7 @@ public final class RootFileProvider extends ContentProvider {
 
     @Override public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
         if (!"r".equals(mode)) throw new FileNotFoundException("Read-only file access.");
+        if (ArchivePreviewSources.matches(uri)) return ArchivePreviewSources.open(uri);
         JSONObject value = record(getContext(), uri);
         ParcelFileDescriptor fd = null;
         try {

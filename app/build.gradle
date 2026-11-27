@@ -1,5 +1,6 @@
 plugins { id 'com.android.application' }
-dependencies { implementation files('../third_party/re2j/re2j-1.8.jar', '../third_party/androidsvg/androidsvg-1.4.jar', '../third_party/commonmark/commonmark-0.24.0.jar', '../third_party/commonmark/commonmark-ext-gfm-tables-0.24.0.jar') }
+dependencies { implementation files('../third_party/re2j/re2j-1.8.jar', '../third_party/androidsvg/androidsvg-1.4.jar', '../third_party/commonmark/commonmark-0.24.0.jar', '../third_party/commonmark/commonmark-ext-gfm-tables-0.24.0.jar', '../third_party/xz/xz-1.12.jar') }
+dependencies { implementation('com.android.tools.smali:smali-baksmali:3.0.9') { exclude group: 'com.beust', module: 'jcommander' } }
 def appId = providers.gradleProperty('fastsearchApplicationId').getOrElse('com.callcraftstudio.anything')
 def signingProperties = new Properties()
 def signingFile = rootProject.file('release-signing.properties')
@@ -7,14 +8,15 @@ if (signingFile.exists()) signingFile.withInputStream { signingProperties.load(i
 android {
     namespace 'dev.fastsearch.android'
     compileSdk 36
+    buildToolsVersion "36.0.0"
     defaultConfig {
         applicationId appId
         manifestPlaceholders = [testedApplicationId: appId]
         minSdk 26
         targetSdk 36
-        versionCode 3
-        versionName '1.0.1'
-        resValue 'string', 'app_name', appId.endsWith('.fresh') ? 'Anything test' : 'Anything'
+        versionCode 4
+        versionName '1.0.2'
+        resValue 'string', 'app_name', appId.endsWith('.fresh') ? (appId.contains('.sms.') ? 'Anything SMS test' : 'Anything test') : 'Anything'
         testInstrumentationRunner 'dev.fastsearch.android.IndexProbe'
     }
     sourceSets {
@@ -25,9 +27,9 @@ android {
     buildFeatures { buildConfig true }
     flavorDimensions += 'distribution'
     productFlavors {
-        full { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'true' }
-        github { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'false' }
-        play { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'false' }
+        full { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'true'; buildConfigField 'boolean', 'APK_INSTALL_ENABLED', 'false' }
+        github { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'false'; buildConfigField 'boolean', 'APK_INSTALL_ENABLED', 'false' }
+        play { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'false'; buildConfigField 'boolean', 'APK_INSTALL_ENABLED', 'false' }
     }
     sourceSets {
         full.java.srcDirs += 'src/funding/java'

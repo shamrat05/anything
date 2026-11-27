@@ -18,6 +18,7 @@ public final class SearchQuery {
         public boolean wholeWord;
         public boolean matchPath;
         public boolean regex;
+        public boolean tolerateTypos = true;
 
         public Options() {}
     }
@@ -29,8 +30,15 @@ public final class SearchQuery {
         @Override protected PatternBudget initialValue() { return new PatternBudget(); }
     };
     private final Node root;
+    private final String typoTerm;
+    private final String typoExtension;
 
-    private SearchQuery(Node root) { this.root = root; }
+    private SearchQuery(Node root, String typoTerm) {
+        this.root = root;
+        int dot = typoTerm == null ? -1 : typoTerm.indexOf('.');
+        this.typoTerm = dot < 0 ? typoTerm : typoTerm.substring(0, dot);
+        typoExtension = dot < 0 ? null : typoTerm.substring(dot + 1);
+    }
 
     public static SearchQuery compile(String text, Options options) {
         String source = text == null ? "" : text;
@@ -38,8 +46,8 @@ public final class SearchQuery {
         Options flags = options == null ? new Options() : options;
         Context context = new Context(flags.matchCase, flags.wholeWord, flags.matchPath ? 1 : 0, false);
         // Everything's Search > Regex mode treats the entire field as one expression.
-        if (flags.regex) return new SearchQuery(regex(source, context, 0, new Compilation()));
-        return new SearchQuery(new Parser(source).parse(context));
+        if (flags.regex) return new SearchQuery(regex(source, context, 0, new Compilation()), null);
+        return new SearchQuery(new Parser(source).parse(context), typoTerm(source, flags));
     }
 
     public boolean matches(FileEntry entry) {
@@ -49,6 +57,74 @@ public final class SearchQuery {
         boolean result = root.matches(entry, budget);
         budget.check();
         return result;
+    }
+
+    /** Used only as a fallback when there are no strict, in-scope filename results. */
+    public boolean hasTypoFallback() { return typoTerm != null; }
+
+    public boolean matchesTypo(FileEntry entry) {
+        if (typoTerm == null || entry == null) return false;
+        String name = entry.foldedName;
+        // Skip very long names and never match on the extension or a parent directory.
+        if (name.length() > 160) return false;
+        int lastDot = entry.directory ? -1 : name.lastIndexOf('.');
+        if (typoExtension != null && (lastDot <= 0 || name.length() - lastDot - 1 != typoExtension.length()
+                || !name.regionMatches(lastDot + 1, typoExtension, 0, typoExtension.length()))) return false;
+        int end = lastDot > 0 ? lastDot : name.length();
+        int count = 0;
+        for (int i = 0; i < end && count < 12;) {
+            while (i < end && !typoLetter(name.charAt(i))) i++;
+            int start = i;
+            while (i < end && typoLetter(name.charAt(i))) i++;
+            if (start == i) break;
+            // Don't turn a substring of an identifier containing digits into a word match.
+            if ((start > 0 && Character.isLetterOrDigit(name.charAt(start - 1)))
+                    || (i < end && Character.isLetterOrDigit(name.charAt(i)))) continue;
+            count++;
+            if (oneTypo(typoTerm, name, start, i)) return true;
+        }
+        return false;
+    }
+
+    private static String typoTerm(String source, Options flags) {
+        if (!flags.tolerateTypos || flags.matchCase || flags.wholeWord || flags.matchPath || source.length() > 96) return null;
+        String term = source.trim().toLowerCase(Locale.ROOT);
+        int dot = term.indexOf('.');
+        int length = dot < 0 ? term.length() : dot;
+        if (length < 4 || length > 32) return null;
+        for (int i = 0; i < length; i++) if (!typoLetter(term.charAt(i))) return null;
+        if (dot >= 0) {
+            int extensionLength = term.length() - dot - 1;
+            if (extensionLength < 1 || extensionLength > 12) return null;
+            for (int i = dot + 1; i < term.length(); i++) {
+                char c = term.charAt(i);
+                if (!(c >= 'a' && c <= 'z' || c >= '0' && c <= '9')) return null;
+            }
+        }
+        return term;
+    }
+
+    private static boolean typoLetter(char ch) {
+        return Character.isLetter(ch);
+    }
+
+    /** One edit, including an adjacent swap, in one scan with no per-entry allocation. */
+    private static boolean oneTypo(String term, String name, int start, int end) {
+        int length = term.length(), other = end - start, difference = length - other;
+        if (difference < -1 || difference > 1 || other < 4) return false;
+        int i = 0;
+        int limit = Math.min(length, other);
+        while (i < limit && term.charAt(i) == name.charAt(start + i)) i++;
+        if (i == limit) return difference != 0;
+        // A substitution or swap is the only allowed edit on equally long terms.
+        if (difference == 0) {
+            if (term.regionMatches(i + 1, name, start + i + 1, length - i - 1)) return true;
+            return i + 1 < length && term.charAt(i) == name.charAt(start + i + 1)
+                    && term.charAt(i + 1) == name.charAt(start + i)
+                    && term.regionMatches(i + 2, name, start + i + 2, length - i - 2);
+        }
+        return difference > 0 ? term.regionMatches(i + 1, name, start + i, limit - i)
+                : term.regionMatches(i, name, start + i + 1, limit - i);
     }
 
     private static final class Context {

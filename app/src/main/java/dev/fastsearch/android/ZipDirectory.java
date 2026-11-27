@@ -20,13 +20,18 @@ final class ZipDirectory {
     static final int MAX_LABEL_CHARACTERS = 256 * 1024;
 
     static final class Entry {
-        final String name;
-        final long size, compressedSize, offset, boundary;
+        final String name, rawName;
+        final long size, compressedSize, offset, boundary, crc;
         final int method, flags;
-        final boolean directory, encrypted;
+        final boolean directory, encrypted, special;
         Entry(String name, long size, long compressedSize, boolean directory, int flags, int method,
                 long offset, long boundary) {
-            this.name = name; this.size = size; this.compressedSize = compressedSize;
+            this(name, size, compressedSize, directory, flags, method, offset, boundary, null, -1, false);
+        }
+        Entry(String name, long size, long compressedSize, boolean directory, int flags, int method,
+                long offset, long boundary, String rawName, long crc, boolean special) {
+            this.name = name; this.rawName = rawName; this.crc = crc; this.special = special;
+            this.size = size; this.compressedSize = compressedSize;
             this.directory = directory; this.encrypted = (flags & 1) != 0;
             this.flags = flags; this.method = method; this.offset = offset; this.boundary = boundary;
         }
@@ -41,7 +46,14 @@ final class ZipDirectory {
         }
     }
 
-    static Listing read(FileChannel file) throws IOException {
+    static Listing read(FileChannel file) throws IOException { return read(file, false, false); }
+
+    static Listing readDexEntries(FileChannel file) throws IOException { return read(file, true, false); }
+
+    static Listing readForIntegrity(FileChannel file) throws IOException { return read(file, false, true); }
+
+    /** Only retain the root classes*.dex records in an APK when dexOnly is set. */
+    private static Listing read(FileChannel file, boolean dexOnly, boolean strict) throws IOException {
         long fileSize = file.size();
         if (fileSize < 22) throw invalid();
         int tailLength = (int) Math.min(fileSize, 65535L + 22);
@@ -75,22 +87,36 @@ final class ZipDirectory {
             return new Listing(new ArrayList<>(), 0, false);
         }
         long directoryEnd = offset + directorySize, start = offset;
-        int labels = 0;
+        int labels = 0, visited = 0;
+        int directoryLimit = dexOnly ? 8 * 1024 * 1024 : MAX_DIRECTORY_BYTES;
+        int scanLimit = dexOnly ? 25_000 : MAX_ENTRIES;
         boolean clipped = false;
-        ArrayList<Entry> entries = new ArrayList<>((int) Math.min(count, MAX_ENTRIES));
-        while (entries.size() < count && entries.size() < MAX_ENTRIES) {
+        ArrayList<Entry> entries = new ArrayList<>((int) Math.min(count, dexOnly ? 16 : MAX_ENTRIES));
+        while (visited < count && visited < scanLimit) {
             PreviewText.cancelled();
             if (directoryEnd - offset < 46) throw invalid();
-            if (offset - start + 46 > MAX_DIRECTORY_BYTES) { clipped = true; break; }
+            if (offset - start + 46 > directoryLimit) { clipped = true; break; }
             byte[] header = bytes(file, offset, 46);
             if (u32(header, 0) != 0x02014B50L) throw invalid();
             int flags = u16(header, 8), nameLength = u16(header, 28), extraLength = u16(header, 30), commentLength = u16(header, 32);
             int length = 46 + nameLength + extraLength + commentLength;
             if (nameLength == 0 || length > directoryEnd - offset || u16(header, 34) != 0) throw invalid();
-            if (offset - start + length > MAX_DIRECTORY_BYTES) { clipped = true; break; }
+            if (offset - start + length > directoryLimit) { clipped = true; break; }
+            visited++;
+            if (dexOnly && (nameLength < 11 || nameLength > 15
+                    || !isDexEntry(new String(bytes(file, offset + 46, nameLength), StandardCharsets.US_ASCII)))) {
+                offset += length;
+                continue;
+            }
             int shown = Math.min(nameLength, MAX_NAME_BYTES);
             byte[] name = bytes(file, offset + 46, shown);
-            String label = safeLabel(new String(name, (flags & 0x800) != 0 ? StandardCharsets.UTF_8 : legacyCharset()));
+            Charset charset = (flags & 0x800) != 0 ? StandardCharsets.UTF_8 : legacyCharset();
+            String label = safeLabel(new String(name, charset));
+            String rawName = null;
+            if (shown == nameLength) {
+                try { rawName = charset.newDecoder().decode(ByteBuffer.wrap(name)).toString(); }
+                catch (java.nio.charset.CharacterCodingException malformed) { /* Display only. */ }
+            }
             if (shown < nameLength) label += "…";
             if (labels + label.length() > MAX_LABEL_CHARACTERS) { clipped = true; break; }
             labels += label.length();
@@ -114,10 +140,30 @@ final class ZipDirectory {
                 if (!found) throw invalid();
             }
             boolean directory = name[name.length - 1] == '/' && shown == nameLength;
-            entries.add(new Entry(label, size, compressed, directory, flags, u16(header, 10), local, start));
+            int host = header[5] & 255;
+            int type = (u16(header, 40) >>> 12) & 15;
+            boolean special = (host == 3 || host == 19) && type != 0 && type != (directory ? 4 : 8);
+            entries.add(new Entry(label, size, compressed, directory, flags, u16(header, 10), local, start,
+                    rawName, u32(header, 16), special));
             offset += length;
         }
-        return new Listing(entries, count, clipped || entries.size() < count);
+        if(strict&&!clipped&&visited==count&&offset!=directoryEnd){
+            // An optional central-directory digital-signature record may follow file records.
+            // Structural check only: this is not APK or ZIP signature verification.
+            if(directoryEnd-offset<6||directoryEnd-offset>6+65535L)throw invalid();
+            byte[] signature=bytes(file,offset,6);
+            if(u32(signature,0)!=0x05054B50L||u16(signature,4)!=directoryEnd-offset-6)throw invalid();
+        }
+        return new Listing(entries, count, clipped || visited < count);
+    }
+
+    static boolean isDexEntry(String name) {
+        if ("classes.dex".equals(name)) return true;
+        if (!name.startsWith("classes") || !name.endsWith(".dex") || name.length() < 12 || name.length() > 15) return false;
+        int end = name.length() - 4;
+        if (name.charAt(7) < '1' || name.charAt(7) > '9') return false;
+        for (int i = 8; i < end; i++) if (name.charAt(i) < '0' || name.charAt(i) > '9') return false;
+        return !name.equals("classes1.dex");
     }
 
     static InputStream open(FileChannel file, Entry entry) throws IOException {

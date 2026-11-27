@@ -22,6 +22,7 @@ public final class SearchQueryTest {
             metadataOrder();
             booleanSyntax();
             textAndWildcards();
+            typoFallback();
             modifiersAndRegex();
             sizes();
             dates();
@@ -33,6 +34,42 @@ public final class SearchQueryTest {
             Locale.setDefault(oldLocale);
             TimeZone.setDefault(oldZone);
         }
+    }
+
+    private static void typoFallback() {
+        FileEntry budget = file("/storage/Documents/Annual budget-final.PDF");
+        for (String needle : new String[]{"budegt", "bodget", "budgt", "buddget", "BUDEGT.pdf"}) {
+            SearchQuery query = SearchQuery.compile(needle, null);
+            check(query.hasTypoFallback() && !query.matches(budget) && query.matchesTypo(budget),
+                    "one typo in a filename token: " + needle);
+        }
+        SearchQuery query = SearchQuery.compile("budegt", null);
+        check(!query.matchesTypo(file("/budget/Annual.pdf")), "no matching folder ancestry");
+        check(!query.matchesTypo(file("/name.budget")), "no matching file extensions");
+        check(!query.matchesTypo(file("/budget2026.pdf")), "no matching identifier substrings");
+        check(!query.matchesTypo(file("/badget.pdf")), "no two-error match");
+        check(!query.matchesTypo(file("/budegt.txt")), "literal name is not reported as a typo");
+        check(query.matchesTypo(new FileEntry("/Annual budget", true, 0, 0)), "folder names in indexed search");
+        check(!SearchQuery.compile("budegt.pfd", null).matchesTypo(budget), "extension spelling remains exact");
+        check(!SearchQuery.compile("budegt.txt", null).matchesTypo(budget), "typed extension does not broaden");
+        check(SearchQuery.compile("réusmé", null).matchesTypo(file("/résumé.txt")), "BMP Unicode letter swap");
+        for (String explicit : new String[]{"abc", "12026", "budegt notes", "budegt ext:pdf", "!budegt",
+                "budegt|memo", "\"budegt\"", "budegt?", "budegt*", "case:budegt", "nopath:budegt",
+                "/Documents/budegt", "regex:budeg.", "budegt.tar.gz", ".pdf"}) {
+            check(!SearchQuery.compile(explicit, null).hasTypoFallback(), "strict syntax unchanged: " + explicit);
+        }
+        for (int option = 0; option < 5; option++) {
+            SearchQuery.Options options = new SearchQuery.Options();
+            switch (option) {
+                case 0: options.tolerateTypos = false; break;
+                case 1: options.matchCase = true; break;
+                case 2: options.matchPath = true; break;
+                case 3: options.wholeWord = true; break;
+                case 4: options.regex = true; break;
+            }
+            check(!SearchQuery.compile("budegt", options).hasTypoFallback(), "strict option: " + option);
+        }
+        check(SearchQuery.compile("budget", null).matches(budget), "ordinary substring match unchanged");
     }
 
     private static void metadataOrder() {

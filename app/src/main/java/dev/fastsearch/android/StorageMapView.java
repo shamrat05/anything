@@ -2,6 +2,8 @@ package dev.fastsearch.android;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
@@ -16,6 +18,7 @@ import android.widget.ListView;
 import android.widget.TextView;
 import dev.fastsearch.core.FileEntry;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -26,25 +29,31 @@ import java.util.function.Predicate;
 /** Scrollable, ordered treemap with recycled horizontal rows. */
 final class StorageMapView extends ListView {
     private static final int MIN_TILE_WIDTH_DP = 60;
+    private static final int TILE_MARK_STRIP_DP = 16;
     private static final int MAX_ROW_TILES = 8;
     private static final double LABEL_FLOOR_BYTES = 30 * (1L << 20);
     private static final double LARGE_ITEM_WEIGHT = 12;
     private static final double MAX_ITEM_WEIGHT = 15;
     private static final double TARGET_ASPECT = 1.5;
-    static final String[] SIZE_LABELS = {"<1 MB", "1 MB+", "100 MB+", "1 GB+"};
-    private static final int[] LIGHT_COLORS = {0xFFE8EDF4, 0xFFC8DAF3, 0xFF9DB9F7, 0xFF7D9CF3};
-    private static final int[] DARK_COLORS = {0xFF313744, 0xFF33486C, 0xFF365586, 0xFF3C639C};
+    static final String[] SIZE_LABELS = {"Smallest", "Small", "Medium", "Large", "Largest"};
+    private static final int[] LIGHT_COLORS = {0xFFBBD9FF, 0xFFC9D2F8, 0xFFE0CCF3, 0xFFF6C1C6, 0xFFFFAEA4};
+    private static final int[] DARK_COLORS = {0xFF235B99, 0xFF414D83, 0xFF634378, 0xFF8C414F, 0xFFA93733};
 
     Function<StorageMapData.Tile,String> labels = tile -> tile.entry.name;
     private final EdgeFastScroll edge = EdgeFastScroll.rows(this, p -> labels.apply((StorageMapData.Tile)getItemAtPosition(p)));
     private final UiTheme theme;
+    private AppOwnerBadges appOwnerBadges;
     private final Function<Long, String> formatSize;
     private final ScaleGestureDetector pinch;
     private final int minTileWidth, minBandHeight, normalStroke, selectedStroke;
     private final Typeface tileTypeface;
     private List<StorageMapData.Tile> tiles = java.util.Collections.emptyList();
     private Predicate<FileEntry> selected = entry -> false;
-    private Consumer<FileEntry> open, select, preview;
+    private Consumer<FileEntry> open, preview;
+    private java.util.function.BiPredicate<List<FileEntry>, FileEntry> openChild;
+    private int highlightedSizeBand=StorageMapData.UNKNOWN;
+    private StorageMapData.Scale scopeScale = new StorageMapData.Scale(0, 0);
+    private java.util.function.BiPredicate<View,FileEntry> hold;
     private String folder;
     private int mapWidth, viewportHeight, bandCount;
     private int[] bandStarts = new int[1], bandHeights = new int[1];
@@ -83,7 +92,7 @@ final class StorageMapView extends ListView {
         minBandHeight = Math.max(dp(44), Math.round(labelSize * 2.5f) + dp(9));
         normalStroke = Math.max(1, dp(1));
         selectedStroke = dp(2);
-        tileTypeface = getResources().getFont(R.font.aeonik_medium);
+        tileTypeface = getResources().getFont(R.font.inter_medium);
         setDivider(null);
         setSelector(android.R.color.transparent);
         setPadding(dp(4), dp(4), dp(4), dp(44));
@@ -112,6 +121,13 @@ final class StorageMapView extends ListView {
         pinch.setStylusScaleEnabled(false);
     }
 
+    void setAppOwnerBadges(AppOwnerBadges badges){this.appOwnerBadges=badges;}
+
+    @Override protected void onScrollChanged(int l,int t,int oldl,int oldt){
+        super.onScrollChanged(l,t,oldl,oldt);
+        if(appOwnerBadges!=null)appOwnerBadges.viewportChanged();
+    }
+
     void clear() {
         if (tiles.isEmpty()) return;
         finishInspection();
@@ -122,13 +138,16 @@ final class StorageMapView extends ListView {
         bands.notifyDataSetChanged();
     }
 
-    void show(String folder, List<StorageMapData.Tile> tiles, Consumer<FileEntry> open,
-            Consumer<FileEntry> select, Consumer<FileEntry> preview) {
+    void show(String folder, List<StorageMapData.Tile> tiles, StorageMapData.Scale scale,
+            Consumer<FileEntry> open, java.util.function.BiPredicate<List<FileEntry>, FileEntry> openChild,
+            java.util.function.BiPredicate<View,FileEntry> hold, Consumer<FileEntry> preview) {
         boolean sameFolder = Objects.equals(this.folder, folder);
         this.open = open;
-        this.select = select;
+        this.openChild = openChild;
+        this.hold = hold;
         this.preview = preview;
-        if (sameFolder && this.tiles == tiles) return;
+        if (sameFolder && this.tiles == tiles && scopeScale == scale) return;
+        scopeScale = scale;
         int oldIndex = firstTile(), oldTop = getChildCount() == 0 ? getPaddingTop() : getChildAt(0).getTop();
         String anchor = sameFolder && oldIndex < this.tiles.size() ? this.tiles.get(oldIndex).entry.path() : null;
         if (!sameFolder) { finishInspection(); zoom = 1; }
@@ -150,6 +169,12 @@ final class StorageMapView extends ListView {
 
     void updateSelection(Predicate<FileEntry> selected) {
         this.selected = selected;
+        updateVisibleTiles();
+    }
+
+    void highlightSizeBand(int band) {
+        if(highlightedSizeBand==band)return;
+        highlightedSizeBand=band;
         updateVisibleTiles();
     }
 
@@ -253,6 +278,24 @@ final class StorageMapView extends ListView {
         return y < edge ? -dp(10) : y > getHeight() - edge ? dp(10) : 0;
     }
 
+    private final int[] fileScreen=new int[2];
+    private final android.graphics.Rect fileVisible=new android.graphics.Rect();
+
+    List<StorageMapData.Tile> previewTiles(){return tiles;}
+
+    FileHoldActions.Target fileTargetAt(float rawX,float rawY,
+            java.util.function.BiFunction<View,FileEntry,FileHoldActions.Target> factory){
+        if(!FileHoldActions.inside(this,rawX,rawY,fileScreen,fileVisible))return null;
+        Band band=bandAt(rawX-fileScreen[0],rawY-fileScreen[1]);
+        if(band==null)return null;
+        for(int i=0;i<band.getChildCount();i++){
+            TileView tile=(TileView)band.getChildAt(i);
+            if(tile.tile!=null&&FileHoldActions.inside(tile,rawX,rawY,fileScreen,fileVisible))
+                return factory.apply(tile,tile.tile.entry);
+        }
+        return null;
+    }
+
     private Band bandAt(float x, float y) {
         return (Band) getChildAt(pointToPosition((int) x, (int) y) - getFirstVisiblePosition());
     }
@@ -315,15 +358,18 @@ final class StorageMapView extends ListView {
         int maxHeight = Math.max(minBandHeight, Math.round(viewportHeight * .46f));
         double scale = Math.min(minBandHeight * .5, maxHeight / MAX_ITEM_WEIGHT) * zoom;
         int minHeight = Math.round(minBandHeight * zoom);
+        int folderMinHeight = Math.round(Math.min(maxHeight, Math.max(minBandHeight, dp(105))) * zoom);
         for (int start = 0; start < count;) {
             double weight = 0, smallest = Double.POSITIVE_INFINITY, largest = 0;
             double bestScore = Double.POSITIVE_INFINITY;
             int rowEnd = start + 1, rowHeight = minHeight;
+            boolean hasSample = false;
             for (int end = start; end < Math.min(start + rowLimit, count); end++) {
                 weight += weights[end];
                 smallest = Math.min(smallest, weights[end]);
                 largest = Math.max(largest, weights[end]);
-                int height = Math.max(minHeight, (int) Math.round(weight * scale));
+                hasSample |= !tiles.get(end).children.isEmpty();
+                int height = Math.max(hasSample ? folderMinHeight : minHeight, (int) Math.round(weight * scale));
                 double narrowest = mapWidth * smallest / weight;
                 if (end > start && (narrowest < minTileWidth || height > maxHeight * zoom)) break;
                 double widest = mapWidth * largest / weight;
@@ -357,14 +403,9 @@ final class StorageMapView extends ListView {
         return extension.isEmpty() ? "File" : extension.toUpperCase(Locale.ROOT) + " file";
     }
 
-    static int sizeBand(long bytes) {
-        if (bytes >= (1L << 30)) return 3;
-        if (bytes >= 100L * (1L << 20)) return 2;
-        return bytes >= (1L << 20) ? 1 : 0;
-    }
-
     int fillColor(int sizeBand) {
-        return (theme.dark ? DARK_COLORS : LIGHT_COLORS)[sizeBand];
+        return sizeBand < 0 ? (theme.dark ? 0xFF323743 : 0xFFE2E6ED)
+                : (theme.dark ? DARK_COLORS : LIGHT_COLORS)[sizeBand];
     }
 
     private final class Band extends ViewGroup {
@@ -418,6 +459,16 @@ final class StorageMapView extends ListView {
 
     private final class TileView extends TextView {
         private final GradientDrawable block = new GradientDrawable();
+        private final android.graphics.drawable.Drawable pickedMark = FileSelectionMark.create(getContext(),theme);
+        private android.graphics.drawable.Drawable fileMark, appOwnerMark;
+        private String ownerDescription;
+        private boolean showTileMarks;
+        private final Paint nestedFill = new Paint();
+        private final android.text.TextPaint nestedText = new android.text.TextPaint(Paint.ANTI_ALIAS_FLAG);
+        private final List<Nested> regions = new ArrayList<>();
+        private FileEntry pendingChild;
+        private float downX, downY;
+        private StorageMapData.Scale drawnScale;
         private StorageMapData.Tile tile;
         private String name, size;
         private int captionWidth = -1, blockLeft, blockTop, blockWidth, blockHeight;
@@ -432,44 +483,184 @@ final class StorageMapView extends ListView {
             setEllipsize(TextUtils.TruncateAt.END);
             setTypeface(tileTypeface);
             setTextColor(theme.ink);
+            nestedText.setColor(theme.ink);
+            nestedText.setTypeface(tileTypeface);
+            nestedText.setTextSize(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 10,
+                    getResources().getDisplayMetrics()));
             setFocusable(true);
             setBackground(block);
-            setOnClickListener(v -> open.accept(tile.entry));
+            setOnClickListener(v -> {
+                FileEntry child = pendingChild;
+                if (child == null || !openChild.test(tile.children, child)) open.accept(tile.entry);
+            });
             setOnLongClickListener(v -> {
-                if (touching) { inspecting = true; inspected = tile.entry; }
-                select.accept(tile.entry);
+                FileEntry entry=tile.entry;
+                if (hold.test(v,entry) && touching) { inspecting = true; inspected = entry; }
                 return true;
             });
         }
 
         void bind(StorageMapData.Tile tile, int left, int top, int width, int height) {
+            boolean geometryChanged = this.tile != tile || width != blockWidth || height != blockHeight
+                    || drawnScale != scopeScale;
             blockLeft = left;
             blockTop = top;
             blockWidth = width;
             blockHeight = height;
             if (this.tile != tile) {
+                pendingChild = null;
                 captionWidth = -1;
-                name = tile.entry.name.replace('\n', ' ').replace('\r', ' ').replace('\u2028', ' ').replace('\u2029', ' ');
-                size = formatSize.apply(tile.bytes);
-                setContentDescription(tile.entry.name + ", " + typeLabel(tile.entry) + ", " + size);
-                block.setColor(fillColor(sizeBand(tile.bytes)));
+                name = clean(tile.entry.name) + (tile.entry.directory ? "  ›" : "");
+                size = tile.bytes < 0 ? "Unknown size" : formatSize.apply(tile.bytes);
+                fileMark = null;
+                String detail = tile.entry.directory && tile.fileCount > 0
+                        ? ", " + tile.fileCount + (tile.indexedChildren ? " indexed" : "")
+                                + (tile.fileCount == 1 ? " file inside" : " files inside") : "";
+                ownerDescription=tile.entry.name + ", " + typeLabel(tile.entry) + ", " + size + detail;
+                setContentDescription(ownerDescription);
             }
             this.tile = tile;
+            if (geometryChanged) {
+                drawnScale = scopeScale;
+                block.setColor(fillColor(tile.entry.directory ? StorageMapData.UNKNOWN : scopeScale.band(tile.bytes)));
+                regions.clear();
+                showTileMarks = width >= dp(72) && height >= captionHeight() + dp(TILE_MARK_STRIP_DP);
+                if (showTileMarks && fileMark == null)
+                    fileMark = getContext().getDrawable(UiTheme.fileIcon(getContext(),tile.entry)).mutate();
+                int leftInset = dp(5), topInset = folderHeaderHeight();
+                if (width >= dp(58) && height >= topInset + dp(24)) {
+                    StorageMapData.regions(tile, width - 2 * leftInset, height - topInset - dp(5),
+                            (file, l, t, r, b) -> {
+                                if(r-l>=2 && b-t>=2) regions.add(new Nested(file,leftInset+l,topInset+t,leftInset+r,topInset+b));
+                            });
+                }
+            }
             int available = Math.max(0, width - getCompoundPaddingLeft() - getCompoundPaddingRight());
             if (available != captionWidth) {
                 captionWidth = available;
                 setText(TextUtils.ellipsize(name, getPaint(), available, TextUtils.TruncateAt.END) + "\n"
                         + TextUtils.ellipsize(size, getPaint(), available, TextUtils.TruncateAt.END));
             }
+            if(appOwnerBadges!=null)appOwnerBadges.bind(this,showTileMarks?tile.entry:null,value->{
+                appOwnerMark=value==null?null:new AppOwnerBadges.Artwork(theme,value.bitmap);
+                setContentDescription(AppOwnerBadges.describe(ownerDescription,value));
+                invalidate();
+            });
             updateSelection();
+        }
+
+        private int captionHeight() { return Math.max(dp(40), getLineHeight() * 2 + dp(9)); }
+        private int folderHeaderHeight() { return captionHeight() + (showTileMarks ? dp(TILE_MARK_STRIP_DP) : 0); }
+
+        @Override public boolean performClick() {
+            try { return super.performClick(); }
+            finally { pendingChild = null; }
+        }
+
+        @Override public boolean onTouchEvent(MotionEvent event) {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX=event.getX(); downY=event.getY(); pendingChild=null;
+                    break;
+                case MotionEvent.ACTION_CANCEL:
+                    pendingChild=null;
+                    break;
+                case MotionEvent.ACTION_UP:
+                    pendingChild=null;
+                    for (Nested region : regions) {
+                        if (region.file != null && region.bounds.width() >= dp(48)
+                                && region.bounds.height() >= dp(48) && region.bounds.contains(downX,downY)
+                                && region.bounds.contains(event.getX(),event.getY())) {
+                            pendingChild=region.file;break;
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+            boolean handled=super.onTouchEvent(event);
+            // TextView may post the click; clean up after its posted click if the gesture was a hold.
+            if(event.getActionMasked()==MotionEvent.ACTION_UP)post(()->pendingChild=null);
+            return handled;
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            // The lower strip belongs to the tile header alone; neither mark covers a caption or nested child.
+            int iconLeft = dp(7), iconTop = captionHeight() - dp(2);
+            if (showTileMarks && fileMark != null) {
+                fileMark.setBounds(iconLeft,iconTop,iconLeft+dp(14),iconTop+dp(14));
+                fileMark.draw(canvas);
+                if (isSelected()) {
+                    int badgeLeft = iconLeft+dp(15), badgeTop = iconTop-dp(2);
+                    pickedMark.setBounds(badgeLeft,badgeTop,badgeLeft+dp(10),badgeTop+dp(10));
+                    pickedMark.draw(canvas);
+                }
+                if(appOwnerMark!=null){
+                    int ownerLeft=iconLeft+dp(15),ownerTop=iconTop+dp(8);
+                    appOwnerMark.setBounds(ownerLeft,ownerTop,ownerLeft+dp(10),ownerTop+dp(10));
+                    appOwnerMark.draw(canvas);
+                }
+            }
+            for (Nested region : regions) {
+                RectF b = region.bounds;
+                nestedFill.setColor(region.color);
+                canvas.drawRect(b.left + 1,b.top + 1,b.right - 1,b.bottom - 1,nestedFill);
+                if(region.file!=null&&highlightedSizeBand>=0&&scopeScale.band(region.file.size)==highlightedSizeBand
+                        &&b.width()>dp(5)&&b.height()>dp(5)){
+                    nestedFill.setColor(theme.ink);
+                    nestedFill.setStyle(Paint.Style.STROKE);
+                    nestedFill.setStrokeWidth(dp(2));
+                    canvas.drawRect(b.left+dp(2),b.top+dp(2),b.right-dp(2),b.bottom-dp(2),nestedFill);
+                    nestedFill.setStyle(Paint.Style.FILL);
+                }
+                if(region.name == null)continue;
+                int save = canvas.save();
+                canvas.clipRect(b.left + 2,b.top + 2,b.right - 2,b.bottom - 2);
+                canvas.drawText(region.name,region.textX,region.firstBaseline,nestedText);
+                if(region.detail != null)canvas.drawText(region.detail,region.textX,region.secondBaseline,nestedText);
+                canvas.restoreToCount(save);
+            }
+        }
+
+        private final class Nested {
+            final FileEntry file;
+            final RectF bounds;
+            final String name, detail;
+            final int color;
+            final float textX, firstBaseline, secondBaseline;
+            Nested(FileEntry file,float l,float t,float r,float b) {
+                this.file = file;
+                bounds = new RectF(l,t,r,b);
+                color = file == null ? theme.surface : fillColor(scopeScale.band(file.size));
+                float available = bounds.width() - dp(10), line = nestedText.getFontSpacing();
+                textX = l + dp(5);
+                firstBaseline = t + dp(3) - nestedText.ascent();
+                secondBaseline = firstBaseline + line;
+                boolean readable = available >= dp(36) && bounds.height() >= line + dp(7);
+                name = readable ? nestedCaption(file == null ? "Other files" : clean(file.name), available) : null;
+                detail = readable && file != null && bounds.height() >= 2 * line + dp(8)
+                        ? nestedCaption(formatSize.apply(file.size) + " · " + typeLabel(file), available) : null;
+            }
+        }
+
+        private String nestedCaption(String value, float width) {
+            return TextUtils.ellipsize(value,nestedText,width,TextUtils.TruncateAt.END).toString();
         }
 
         void updateSelection() {
             boolean marked = selected.test(tile.entry);
             boolean hovered = inspected != null && inspected.path().equals(tile.entry.path());
-            block.setStroke(marked || hovered ? selectedStroke : normalStroke, marked || hovered ? theme.accent : theme.surface);
+            boolean highlighted=highlightedSizeBand>=0&&!tile.entry.directory&&scopeScale.band(tile.bytes)==highlightedSizeBand;
+            block.setStroke(marked||hovered||highlighted?selectedStroke:normalStroke,
+                    marked||hovered?theme.accent:highlighted?theme.ink:theme.surface);
             setSelected(marked);
+            invalidate();
         }
+    }
+
+    private static String clean(String name) {
+        return name.replace('\n',' ').replace('\r',' ').replace('\u2028',' ').replace('\u2029',' ');
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }

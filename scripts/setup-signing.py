@@ -1,14 +1,39 @@
 #!/usr/bin/env python3
 """Create a private local key, or restore the same key from an Actions secret."""
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
 import secrets
 import subprocess
+import tempfile
+
+from signing_identity import PUBLISHED_CERT
 
 project = Path(__file__).resolve().parent.parent
 bundle_env = os.environ.get('FASTSEARCH_SIGNING_BUNDLE', '')
+require_published = os.environ.get('FASTSEARCH_REQUIRE_PUBLISHED_SIGNER') == '1'
+if require_published:
+    if not bundle_env:
+        raise SystemExit('Production build requires the published signing key.')
+    try:
+        expected_bundle = json.loads(bundle_env)
+        key_data = base64.b64decode(expected_bundle['keystore_b64'], validate=True)
+        with tempfile.TemporaryDirectory(prefix='anything-signer-', dir=os.environ['RUNNER_TEMP']) as temp:
+            candidate = Path(temp) / 'candidate.p12'
+            with candidate.open('xb') as stream:
+                os.chmod(candidate, 0o600)
+                stream.write(key_data)
+            cert = subprocess.check_output(
+                ['keytool', '-exportcert', '-keystore', str(candidate), '-storetype', 'PKCS12',
+                 '-storepass:env', 'FASTSEARCH_KEY_PASSWORD', '-alias', expected_bundle['key_alias']],
+                env={**os.environ, 'FASTSEARCH_KEY_PASSWORD': expected_bundle['store_password']},
+                stderr=subprocess.DEVNULL)
+    except (ValueError, KeyError, TypeError, OSError, subprocess.CalledProcessError):
+        raise SystemExit('Production signing bundle could not be verified.') from None
+    if hashlib.sha256(cert).hexdigest() != PUBLISHED_CERT:
+        raise SystemExit('Production signing key does not match the published APK.')
 key_dir = Path(os.environ['RUNNER_TEMP']) / 'anything-signing' if bundle_env else Path.home() / '.local/share/anything-android'
 key_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 key_file = key_dir / 'app-signing.p12'

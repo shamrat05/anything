@@ -15,6 +15,7 @@ import android.graphics.RectF;
 import android.graphics.drawable.BitmapDrawable;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
@@ -26,8 +27,10 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ListView;
+import android.widget.LinearLayout;
 import android.widget.ImageView;
 import android.widget.MediaController;
 import android.widget.ScrollView;
@@ -71,7 +74,34 @@ public final class PreviewUiProbe extends Instrumentation {
             target = getTargetContext(); application = (Application) target.getApplicationContext();
             tracker = new Tracker(); application.registerActivityLifecycleCallbacks(tracker);
             fixtures();if(arguments!=null&&"archive".equals(arguments.getString("phase"))){archive();collectActivities();passed=true;}
+            else if(arguments!=null&&"archiveNested".equals(arguments.getString("phase"))){nestedArchive();passed=true;}
+            else if(arguments!=null&&"extract".equals(arguments.getString("phase"))){extractArchive();passed=true;}
+            else if(arguments!=null&&"streamExtract".equals(arguments.getString("phase"))){extractStreamArchives();passed=true;}
+            else if(arguments!=null&&"sevenZip".equals(arguments.getString("phase"))){extractSevenZip();passed=true;}
+            else if(arguments!=null&&"apk".equals(arguments.getString("phase"))){apkActions();passed=true;}
+            else if(arguments!=null&&"apkContents".equals(arguments.getString("phase"))){apkContents();passed=true;}
+            else if(arguments!=null&&"unknownText".equals(arguments.getString("phase"))){unknownText();passed=true;}
+            else if(arguments!=null&&"codeText".equals(arguments.getString("phase"))){codeText();passed=true;}
+            else if(arguments!=null&&"office".equals(arguments.getString("phase"))){officeSummary();passed=true;}
+            else if(arguments!=null&&"viewerDelete".equals(arguments.getString("phase"))){
+                viewerDelete();passed=true;
+            }
+            else if(arguments!=null&&"zipDrag".equals(arguments.getString("phase"))){
+                FileViewerActivity viewer=open(archiveUri,"entries.zip");
+                dragToZipPdf(viewer);
+                await(()->archivePage(viewer,1),8000,"releasing over the ZIP row opens only its PDF");
+                close(viewer);passed=true;
+            }
+            else if(arguments!=null&&"photos".equals(arguments.getString("phase"))){
+                image();browsing();passed=true;
+            }
+            else if(arguments!=null&&"media".equals(arguments.getString("phase"))){
+                check(videoAvailable,"required seekable video fixture");
+                media(wavUri,"silent.wav",true);media(videoUri,"synthetic.mp4",false);passed=true;
+            }
+            else if(arguments!=null&&"hex".equals(arguments.getString("phase"))){hexInspection();passed=true;}
             else if(arguments!=null&&"back".equals(arguments.getString("phase"))){backExit();collectActivities();passed=true;}
+            else if(arguments!=null&&"lifecycle".equals(arguments.getString("phase"))){cancelledOpen();lateDelivery();repeatedCleanup();collectActivities();passed=true;}
             else{image(); browsing(); aspectTransitions(); pdf(); text(); archive(); media(wavUri, "silent.wav", true);
             if (videoAvailable) media(videoUri, "synthetic.mp4", false);
             revisits(); unsupportedSwipes(); backExit(); cancelledOpen(); lateDelivery(); repeatedCleanup(); collectActivities(); passed = true;}
@@ -102,7 +132,17 @@ public final class PreviewUiProbe extends Instrumentation {
         File wav = new File(fixture, "silent.wav"); PreviewUiFixtures.wav(wav); wavUri = issue(wav);
         if (arguments == null || !"false".equals(arguments.getString("video"))) {
             File video = new File(fixture, "synthetic.mp4");
-            try { PreviewUiFixtures.video(video); videoUri = issue(video); videoAvailable = true; }
+            try {
+                if(arguments!=null&&"media".equals(arguments.getString("phase"))){
+                    // Synthetic 12-second H.264 test pattern, not sensitive media.
+                    try(java.io.InputStream input=getContext().getAssets().open("samples/PlaybackProbe.mp4");
+                        java.io.FileOutputStream outputStream=new java.io.FileOutputStream(video)){
+                        byte[] buffer=new byte[16*1024];int count;
+                        while((count=input.read(buffer))!=-1)outputStream.write(buffer,0,count);
+                    }
+                }else PreviewUiFixtures.video(video);
+                videoUri=issue(video);videoAvailable=true;
+            }
             catch (Exception unsupported) { report.append("Optional platform video generation unavailable: ").append(unsupported.getClass().getSimpleName()).append(".\n"); }
         }
         report.append("Generated PNG, PDF, literal HTML, ZIP and 30-second silent PCM WAV fixtures.\n");
@@ -114,8 +154,41 @@ public final class PreviewUiProbe extends Instrumentation {
     private FileViewerActivity open(Uri uri, String name) {
         Intent intent = FileViewerActivity.intent(target, uri, name, new File(fixture, name).getPath(), -1).putExtra(MARKER, true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         FileViewerActivity activity = (FileViewerActivity) startActivitySync(intent);
-        await(() -> snapshot(activity).ready, 15000, "viewer completes provider-backed preview and layout"); waitForIdleSync(); return activity;
+        await(() -> snapshot(activity).ready, 15000, "viewer completes provider-backed preview and layout"); waitForIdleSync();
+        main(()->{
+            View notice=(View)field(activity,"notice");
+            LinearLayout chrome=(LinearLayout)notice.getParent();
+            check(chrome.indexOfChild(notice)==1,"viewer header has no permanent decorative progress line");
+            check(((android.widget.ProgressBar)field(activity,"selectionProgress")).getParent()==chrome,
+                    "real file-operation progress still exists");
+        });
+        return activity;
     }
+    private void viewerDelete() throws Exception {
+        java.util.List<FileEntry> entries=new ArrayList<>();
+        for(String name:new String[]{"synthetic.png","literal.html"}){
+            File file=new File(fixture,name);entries.add(new FileEntry(file.getCanonicalPath(),false,file.length(),file.lastModified()));
+        }
+        PreviewSession session=PreviewSession.create(entries,entries.get(0).path(),false);
+        Intent intent=FileViewerActivity.intent(target,imageUri,"synthetic.png",entries.get(0).path(),-1)
+                .putExtra(PreviewSession.EXTRA,session.id).putExtra(MARKER,true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        FileViewerActivity viewer=(FileViewerActivity)startActivitySync(intent);
+        await(()->snapshot(viewer).ready,15000,"viewer fixture ready");
+        main(()->viewer.findViewById(R.id.preview_select).performClick());
+        main(()->viewer.findViewById(R.id.preview_next).performClick());
+        await(()->session.position==1&&snapshot(viewer).ready,15000,"next viewer fixture ready");
+        main(()->{
+            viewer.findViewById(R.id.preview_select).performClick();
+            View delete=viewer.findViewById(R.id.preview_delete_selected);
+            check(session.selected.size()==2&&delete.isShown()&&delete.isEnabled(),"pinned Delete visible with two selected files");
+            delete.performClick();
+        });
+        clickAccessible("Cancel");
+        check(new File(entries.get(0).path()).isFile()&&new File(entries.get(1).path()).isFile()
+                &&session.selected.size()==2,"viewer confirmation cancellation preserves selection and both fixtures");
+        close(viewer);PreviewSession.release(session.id);
+    }
+
     private void image() throws Exception {
         FileViewerActivity activity = open(imageUri, "synthetic.png");
         check(snapshot(activity).image != null, "real image view is visible"); capture(activity, "01-image");
@@ -162,6 +235,31 @@ public final class PreviewUiProbe extends Instrumentation {
     private void clickAccessible(String text){
         try{await(()->clickWindowText(automation().getRootInActiveWindow(),text),5000,"click "+text);
         }catch(AssertionError failure){try{FileViewerActivity active=tracker.current();if(active!=null)capture(active,"dialog-failure");}catch(Exception ignored){}throw failure;}waitForIdleSync();
+    }
+    private void clickPopupItem(String label) {
+        // OEM PopupMenu exposes a radio row whose accessibility click may be acknowledged
+        // by its container without selecting the item. Tap the exact visible label instead.
+        await(() -> {
+            AccessibilityNodeInfo root=automation().getRootInActiveWindow();
+            if(root==null)return false;
+            try{
+                java.util.List<AccessibilityNodeInfo> matches=root.findAccessibilityNodeInfosByText(label);
+                try{
+                    for(AccessibilityNodeInfo node:matches){
+                        if(!node.refresh()||!node.isVisibleToUser()||!label.contentEquals(String.valueOf(node.getText())))continue;
+                        Rect rect=new Rect();node.getBoundsInScreen(rect);
+                        if(rect.isEmpty())continue;
+                        long time=SystemClock.uptimeMillis();
+                        MotionEvent down=MotionEvent.obtain(time,time,MotionEvent.ACTION_DOWN,rect.centerX(),rect.centerY(),0);
+                        MotionEvent up=MotionEvent.obtain(time,time+40,MotionEvent.ACTION_UP,rect.centerX(),rect.centerY(),0);
+                        try{return automation().injectInputEvent(down,true)&&automation().injectInputEvent(up,true);}
+                        finally{down.recycle();up.recycle();}
+                    }
+                    return false;
+                }finally{for(AccessibilityNodeInfo node:matches)node.recycle();}
+            }finally{root.recycle();}
+        },8000,"tap popup item "+label);
+        waitForIdleSync();
     }
     private boolean clickWindowText(AccessibilityNodeInfo root,String text){if(root==null)return false;
         try{List<AccessibilityNodeInfo> matches=root.findAccessibilityNodeInfosByText(text);try{for(AccessibilityNodeInfo node:matches){
@@ -242,6 +340,90 @@ public final class PreviewUiProbe extends Instrumentation {
     private static Object member(Object owner,String name){try{Field field=owner.getClass().getDeclaredField(name);field.setAccessible(true);return field.get(owner);}
         catch(ReflectiveOperationException failure){throw new AssertionError(name,failure);}}
 
+    private void hexInspection()throws Exception{
+        File binary=new File(fixture,"byte-layout.bin");
+        byte[] known=new byte[1520];
+        known[0]=65; known[1]=66; known[2]=0;
+        for(int at:new int[]{513,1040}){known[at]=79;known[at+1]=(byte)162;known[at+2]=30;}
+        try(java.io.FileOutputStream out=new java.io.FileOutputStream(binary)){out.write(known);}
+        FileEntry own=new FileEntry(binary.getCanonicalPath(),false,binary.length(),binary.lastModified());
+        PreviewSession session=PreviewSession.create(java.util.Collections.singletonList(own),own.path(),false);
+        Intent intent=FileViewerActivity.intent(target,issue(binary),own.name,own.path(),own.size)
+                .putExtra(PreviewSession.EXTRA,session.id).putExtra(MARKER,true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        FileViewerActivity viewer=(FileViewerActivity)startActivitySync(intent);
+        await(()->{
+            AtomicBoolean ready=new AtomicBoolean();
+            main(()->{View actions=(View)field(viewer,"moreAction");
+                ready.set(actions!=null&&actions.isShown()&&field(viewer,"pending")==null);});
+            return ready.get();
+        },15000,"unsupported binary viewer shows file actions");
+        clickAccessible("More file actions");clickAccessible(HexInspectionSheet.LABEL);
+        await(()->hexText(viewer,"00000000  41 42 00"),5000,"real bytes in offset/hex view");
+        check(hexText(viewer,"|AB")&&hexText(viewer,"Read only"),"ASCII and read-only mode are explicit");
+        hexButton(viewer,"Next page");
+        await(()->hexText(viewer,"00000200"),5000,"paged view starts at 512");
+        hexInput(viewer,"Byte offset","0x1");hexButton(viewer,"Go");
+        await(()->hexText(viewer,"00000000"),5000,"direct absolute offset restores containing page");
+        hexInput(viewer,"Hex bytes to find","4F A2 1E");hexButton(viewer,"Find");
+        await(()->hexText(viewer,"Match at 0x201"),5000,"search finds the first exact byte match");
+        hexButton(viewer,"Find next");
+        await(()->hexText(viewer,"Match at 0x410"),5000,"find next navigates to another match");
+        hexInput(viewer,"Hex bytes to find","1");hexButton(viewer,"Find next");
+        await(()->hexText(viewer,"Use complete hex bytes"),5000,"incomplete byte input is not executed");
+        check(java.util.Arrays.equals(known,java.nio.file.Files.readAllBytes(binary.toPath())),
+                "view, navigation, and search preserve the owned file bytes");
+        try(java.io.FileOutputStream changed=new java.io.FileOutputStream(binary,true)){changed.write(99);}
+        hexButton(viewer,"Previous page");
+        await(()->hexText(viewer,"The file changed"),5000,"different file identity stops further reads");
+        sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK);
+        await(()->{
+            AtomicBoolean hidden=new AtomicBoolean();main(()->hidden.set(field(viewer,"activeSheet")==null));return hidden.get();
+        },5000,"system back returns to the viewer");
+        close(viewer);
+    }
+    private void hexButton(FileViewerActivity viewer,String name){
+        main(()->{
+            AppSheet sheet=(AppSheet)field(viewer,"activeSheet");
+            Button selected=sheet==null?null:button(sheet.getWindow().getDecorView(),name);
+            check(selected!=null&&selected.isEnabled()&&selected.performClick(),"hex tool button "+name);
+        });
+    }
+    private void hexInput(FileViewerActivity viewer,String description,String text){
+        main(()->{
+            AppSheet sheet=(AppSheet)field(viewer,"activeSheet");
+            android.widget.EditText selected=sheet==null?null:hexField(sheet.getWindow().getDecorView(),description);
+            check(selected!=null,"hex tool input "+description);selected.setText(text);
+        });
+    }
+    private static android.widget.EditText hexField(View candidate,String description){
+        if(candidate instanceof android.widget.EditText&&description.equals(candidate.getContentDescription()))
+            return (android.widget.EditText)candidate;
+        if(candidate instanceof ViewGroup){
+            ViewGroup group=(ViewGroup)candidate;
+            for(int i=0;i<group.getChildCount();i++){
+                android.widget.EditText found=hexField(group.getChildAt(i),description);
+                if(found!=null)return found;
+            }
+        }
+        return null;
+    }
+    private boolean hexText(FileViewerActivity viewer,String substring){
+        AtomicBoolean found=new AtomicBoolean();
+        main(()->{
+            AppSheet sheet=(AppSheet)field(viewer,"activeSheet");
+            found.set(sheet!=null&&sheet.isShowing()&&hexText(sheet.getWindow().getDecorView(),substring));
+        });
+        return found.get();
+    }
+    private static boolean hexText(View candidate,String substring){
+        if(candidate instanceof TextView&&((TextView)candidate).getText().toString().contains(substring))return true;
+        if(candidate instanceof ViewGroup){
+            ViewGroup group=(ViewGroup)candidate;
+            for(int i=0;i<group.getChildCount();i++)if(hexText(group.getChildAt(i),substring))return true;
+        }
+        return false;
+    }
+
     private void pdf() throws Exception {
         FileViewerActivity activity = open(pdfUri, "three-pages.pdf"); check(snapshot(activity).pages == 3 && snapshot(activity).page == 0, "PDF count and first page");
         click(activity, "Next"); await(() -> snapshot(activity).ready && snapshot(activity).page == 1, 10000, "PDF next page"); capture(activity, "04-pdf-page-two");
@@ -261,15 +443,49 @@ public final class PreviewUiProbe extends Instrumentation {
         FileViewerActivity rotated = rotate(activity); assertStopped(activity);
         await(() -> Math.abs(snapshot(rotated).scroll - saved) < 40, 4000, "text scroll restores after layout"); close(rotated);
     }
+    private void dragToZipPdf(FileViewerActivity activity) {
+        int[][] centers=new int[2][];
+        View[] pdf=new View[1];
+        main(() -> {
+            ListView entries=find(content(activity),ListView.class);
+            View first=null;
+            for(int i=0;i<entries.getChildCount();i++){
+                View row=entries.getChildAt(i);
+                TextView label=(TextView)((LinearLayout)((LinearLayout)row).getChildAt(1)).getChildAt(0);
+                if("folder/embedded.pdf".contentEquals(label.getText()))pdf[0]=row;
+                else if(first==null&&entries.getAdapter().isEnabled(entries.getFirstVisiblePosition()+i))first=row;
+            }
+            check(first!=null&&pdf[0]!=null,"ZIP entry choices visible before drag");
+            centers[0]=centerOnScreen(first);
+            centers[1]=centerOnScreen(pdf[0]);
+        });
+        long time=SystemClock.uptimeMillis();
+        zipTouch(time,MotionEvent.ACTION_DOWN,centers[0]);
+        SystemClock.sleep(220);
+        zipTouch(time,MotionEvent.ACTION_MOVE,centers[1]);
+        main(()->check(pdf[0].isPressed()&&field(activity,"activeSheet")==null,
+                "ZIP highlight follows without opening"));
+        zipTouch(time,MotionEvent.ACTION_UP,centers[1]);
+    }
+    private static int[] centerOnScreen(View view){
+        int[] xy=new int[2];view.getLocationOnScreen(xy);xy[0]+=view.getWidth()/2;xy[1]+=view.getHeight()/2;return xy;
+    }
+    private void zipTouch(long time,int action,int[] at){
+        MotionEvent e=MotionEvent.obtain(time,SystemClock.uptimeMillis(),action,at[0],at[1],0);
+        e.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        try{check(automation().injectInputEvent(e,true),"real Android ZIP gesture event "+action);}
+        finally{e.recycle();}
+    }
     private void archive() throws Exception {
         FileViewerActivity activity = open(archiveUri, "entries.zip");
         main(() -> { ListView list = find(content(activity), ListView.class); check(list != null && list.getCount() == 4, "ZIP rows show entry metadata"); });
         ActivityMonitor chooser = addMonitor(new android.content.IntentFilter(Intent.ACTION_CHOOSER),
                 new ActivityResult(Activity.RESULT_CANCELED, null), true);
         try {
+            main(() -> ((View)field(activity,"moreAction")).performClick());
             clickAccessible("Share file");
             await(() -> chooser.getHits() == 1, 5000, "viewer Share opens chooser");
-            clickAccessible("folder/embedded.pdf");
+            dragToZipPdf(activity);
             await(() -> archivePage(activity, 1), 8000, "embedded PDF displays page 1 of 3");
             main(() -> {
                 AppSheet sheet = (AppSheet) field(activity, "activeSheet");
@@ -307,6 +523,614 @@ public final class PreviewUiProbe extends Instrumentation {
         FileViewerActivity rotated = rotate(activity); assertStopped(activity);
         main(() -> { ListView list = find(content(rotated), ListView.class); check(list != null && list.getCount() == 4, "ZIP listing survives rotation"); }); close(rotated);
     }
+
+    private void nestedArchive()throws Exception{
+        byte[] doc=archiveFixture(java.util.Collections.singletonMap("word/document.xml",
+            ("<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
+                    +"<w:body><w:p><w:r><w:t>Owned archived document</w:t></w:r></w:p></w:body></w:document>")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        java.util.Map<String,byte[]> inside=new java.util.LinkedHashMap<>();
+        inside.put("inside-note.docx",doc);
+        inside.put("inside-audio.wav",java.nio.file.Files.readAllBytes(new File(fixture,"silent.wav").toPath()));
+        try(java.io.InputStream video=getContext().getAssets().open("samples/PlaybackProbe.mp4")){
+            java.io.ByteArrayOutputStream encoded=new java.io.ByteArrayOutputStream();
+            byte[] data=new byte[16*1024];int n;
+            while((n=video.read(data))!=-1)encoded.write(data,0,n);
+            inside.put("inside-video.mp4",encoded.toByteArray());
+        }
+        byte[] nested=archiveFixture(inside);
+        File outer=new File(fixture,"outer-owned.zip");
+        java.nio.file.Files.write(outer.toPath(),archiveFixture(java.util.Collections.singletonMap("inner-owned.zip",nested)));
+        FileViewerActivity parent=open(issue(outer),outer.getName());
+        FileViewerActivity inner=openNestedEntry(parent,"inner-owned.zip");
+        Uri innerUri=inner.getIntent().getData();
+        check(ArchivePreviewSources.depth(innerUri)==1,"nested viewer is backed by a bounded private snapshot");
+        FileViewerActivity word=openNestedEntry(inner,"inside-note.docx");
+        Uri wordUri=word.getIntent().getData();
+        check(ArchivePreviewSources.depth(wordUri)==2,"document inside nested archive has distinct depth");
+        main(()->{
+            Object shown=field(word,"shown");
+            OfficePreview.Result rendered=(OfficePreview.Result)field(shown,"office");
+            check(rendered!=null&&rendered.sections.get(0).text.contains("Owned archived document"),
+                    "archived DOCX renders through the ordinary Office viewer");
+        });
+        close(word);
+        check(!sourceStillOpen(wordUri),"closing archived document releases the private source");
+        FileViewerActivity audio=openNestedEntry(inner,"inside-audio.wav");
+        Uri audioUri=audio.getIntent().getData();
+        await(()->snapshot(audio).prepared,15000,"archived WAV prepares through the ordinary media player");
+        close(audio);
+        check(!sourceStillOpen(audioUri),"closing archived audio releases the private source");
+        FileViewerActivity video=openNestedEntry(inner,"inside-video.mp4");
+        Uri videoUri=video.getIntent().getData();
+        await(()->snapshot(video).prepared,15000,"archived MP4 prepares through the ordinary media player");
+        close(video);
+        check(!sourceStillOpen(videoUri),"closing archived video releases the private source");
+        check(sourceStillOpen(innerUri),"Back keeps the parent archive available");
+        close(inner);
+        check(!sourceStillOpen(innerUri),"closing nested archive releases its source");
+        close(parent);
+        check(outer.isFile()&&!new File(fixture,"inner-owned.zip").exists(),
+                "viewer never extracts an archive member to the user's folder");
+    }
+
+    private static byte[] archiveFixture(java.util.Map<String,byte[]> entries)throws java.io.IOException{
+        java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream();
+        try(java.util.zip.ZipOutputStream zip=new java.util.zip.ZipOutputStream(bytes)){
+            for(java.util.Map.Entry<String,byte[]> element:entries.entrySet()){
+                zip.putNextEntry(new java.util.zip.ZipEntry(element.getKey()));
+                zip.write(element.getValue());zip.closeEntry();
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    private FileViewerActivity openNestedEntry(FileViewerActivity parent,String entry){
+        ActivityMonitor monitor=addMonitor(FileViewerActivity.class.getName(),null,false);
+        try{
+            main(()->{
+                ListView list=(ListView)field(parent,"archiveList");
+                for(int i=0;i<list.getCount();i++){
+                    ZipDirectory.Entry row=(ZipDirectory.Entry)list.getAdapter().getItem(i);
+                    if(entry.equals(row.name)){list.performItemClick(null,i,i);return;}
+                }
+                throw new AssertionError("Missing entry: "+entry);
+            });
+            FileViewerActivity child=(FileViewerActivity)waitForMonitorWithTimeout(monitor,15000);
+            check(child!=null&&child!=parent,"opened "+entry+" inside Anything");
+            await(()->snapshot(child).ready,15000,"nested reader ready for "+entry);
+            return child;
+        }finally{removeMonitor(monitor);}
+    }
+
+    private boolean sourceStillOpen(Uri uri){
+        try(android.os.ParcelFileDescriptor descriptor=ArchivePreviewSources.open(uri)){return descriptor!=null;}
+        catch(java.io.IOException closed){return false;}
+    }
+
+    private void extractArchive() throws Exception {
+        File zip = new File(fixture,"clean.zip");
+        try (java.util.zip.ZipOutputStream output = new java.util.zip.ZipOutputStream(new FileOutputStream(zip))) {
+            output.putNextEntry(new java.util.zip.ZipEntry("Documents/Note.txt"));
+            output.write(new byte[]{8,14,26});
+            output.closeEntry();
+        }
+        FileViewerActivity activity = open(issue(zip),"clean.zip");
+        File destination = new File(fixture,"clean");
+        File note = new File(destination,"Documents/Note.txt");
+        check(!destination.exists(),"opening an archive does not extract it");
+        int[] extractCenter = new int[2];
+        main(()->{
+            Button button = button(content(activity),"Extract all…");
+            button.getLocationOnScreen(extractCenter);
+            extractCenter[0]+=button.getWidth()/2; extractCenter[1]+=button.getHeight()/2;
+            check(extractCenter[1] > target.getResources().getDisplayMetrics().heightPixels * .7,
+                    "extract is a lower-screen primary action");
+        });
+        click(activity,"Extract all…");
+        main(()->{
+            AppSheet sheet = (AppSheet)field(activity,"activeSheet");
+            Button confirm = button(sheet.actions,"Extract here");
+            int[] center = new int[2];
+            confirm.getLocationOnScreen(center);
+            center[0]+=confirm.getWidth()/2; center[1]+=confirm.getHeight()/2;
+            float density = target.getResources().getDisplayMetrics().density;
+            check(Math.abs(center[0]-extractCenter[0]) <= 24*density &&
+                    Math.abs(center[1]-extractCenter[1]) <= 72*density,"confirm is near the original extract button");
+        });
+        main(()->{
+            AppSheet sheet=(AppSheet)field(activity,"activeSheet");
+            View browse=description(sheet.content,"Browse extraction destination");
+            check(browse!=null&&browse.performClick(),"archive offers a visual folder destination picker");
+            FolderPathDialog picker=(FolderPathDialog)field(activity,"extractFolderPicker");
+            check(picker!=null,"destination picker opened");
+            picker.dismiss();
+            check(sheet.isShowing(),"closing destination picker returns to archive confirmation");
+            find(sheet.content,EditText.class).setText("relative");
+        });
+        confirmExtraction(activity);
+        main(()->{
+            AppSheet sheet=(AppSheet)field(activity,"activeSheet");
+            check(sheet!=null&&sheet.isShowing()&&find(sheet.content,EditText.class).getError()!=null,
+                    "invalid destination stays open for correction");
+        });
+        setExtractDestination(activity);
+        confirmExtraction(activity);
+        await(()->extractNotice(activity).startsWith("Extracted to "),45000,"explicit extraction finishes in chosen folder");
+        check(java.util.Arrays.equals(java.nio.file.Files.readAllBytes(note.toPath()),new byte[]{8,14,26}),
+                "Files contains the exact extracted bytes");
+        java.nio.file.Files.write(note.toPath(),new byte[]{99});
+        click(activity,"Extract all…");
+        setExtractDestination(activity);
+        confirmExtraction(activity);
+        await(()->extractNotice(activity).contains("same name already exists"),45000,"existing destination is refused");
+        check(java.util.Arrays.equals(java.nio.file.Files.readAllBytes(note.toPath()),new byte[]{99}),
+                "existing destination was not replaced");
+        close(activity);
+        check(fixtureDescriptors()==0,"extraction viewer closes its file descriptors");
+        ArchiveExtraction.removeStaging(destination.toPath());
+        check(!destination.exists(),"owned extracted test fixture cleaned up");
+    }
+
+    private void extractSevenZip() throws Exception {
+        File archive = new File(fixture,"synthetic.7z");
+        // Exact bytes of the independent 7-Zip 26.06 solid fixture used by the host tests.
+        byte[] bytes = android.util.Base64.decode(
+                "N3q8ryccAAQtXAjT4QEAAAAAAAAiAAAAAAAAABqwBsbhtSEBWl0AJxvKhmSSsFHcOzIVeM8qb/6vWzyKnBF2IqQw4UcMoal"
+                + "OyzlpziL0eU1cFwOaAlzh5E+NPHJLovjJsDpha8Qts8ggUCc8uZo55e85E0n4DbQaKiknizbx33YLtVMOsCT/4IaBIl/dH6"
+                + "oVnYLGsnBrHKt4YOMoYOHhvzliMiv+vl1xhFKuKhVGNY7fw6lirBU7pQv4Q0NMEaZMhaTKT9UxH/FjFD3I0mnHm+cZV/d39"
+                + "wP2/3KlnTYuxqKPuwzXmwb8eOILv02F++l09MA9fI1oA3LA2numttwglvcpOc5fxaz6Bqf0g3XxxsVIIjDQd4Enl4iS8rLU"
+                + "7T0FYBkW8a+oeiO4AKsTnXmtEUREuzlYsFE/ZLxCbyfqwrYi0FPfmFAIta+6F4MoJCf4LkV6KzskwgvatXYVOXe0NIeDiVN"
+                + "FxzX/F4zJXTh7vJUHhy5YCJBS9vG6UoqzNd5/AAAAAIEzB64P1Tn9wZck0/6zcBaxaPt1R3xXaJMTUDSsPoY1odnhv6+y7B"
+                + "KgNjQJVUm81j32xHuni8Z5s8KZRQmDV1r7NyqUlBLjTMC9NnRGn2eSWX075m4iIjh/T3olAKLYA0nMJ/LMrXYGf2adw3+7n"
+                + "bmxksTsIbOVVwdMIBwAFwaBYgEJfwAHCwEAASMDAQEFXQAQAAAMgLIKATbpZV0AAA==",android.util.Base64.DEFAULT);
+        java.nio.file.Files.write(archive.toPath(),bytes);
+        FileViewerActivity activity = open(issue(archive),archive.getName());
+        File destination = new File(fixture,"synthetic");
+        File note = new File(destination,"docs/雪.txt");
+        check(!destination.exists(),"opening the 7z preview does not extract");
+        main(()->{
+            Object result=field(activity,"shown");
+            SevenZipArchive.Listing list=(SevenZipArchive.Listing)field(result,"sevenZip");
+            check(list.count==5&&list.entries.stream().anyMatch(item->item.name.equals("docs/雪.txt")),
+                    "viewer lists the independently produced archive directory");
+        });
+        ActivityMonitor member=addMonitor(FileViewerActivity.class.getName(),null,false);
+        try{
+            main(()->{
+                TextView row=exactText(content(activity),"docs/雪.txt");
+                check(row!=null&&row.isClickable()&&row.performClick(),"activate 7z member");
+            });
+            FileViewerActivity child=(FileViewerActivity)waitForMonitorWithTimeout(member,15000);
+            check(child!=null&&child!=activity,"selected 7z member opens inside Anything");
+            await(()->snapshot(child).ready,15000,"7z member text ready");
+            main(()->{
+                PreviewText.Result text=(PreviewText.Result)field(field(child,"shown"),"text");
+                check(text!=null&&text.text.contains("Note from a synthetic 7z fixture"),"7z member bytes rendered without extraction");
+            });
+            Uri childUri=child.getIntent().getData();
+            close(child);
+            check(!sourceStillOpen(childUri)&&!destination.exists(),"closing 7z preview releases source without extracting");
+        }finally{removeMonitor(member);}
+        click(activity,"Extract all…");
+        setExtractDestination(activity);
+        confirmExtraction(activity);
+        await(()->extractNotice(activity).startsWith("Extracted to "),45_000,"explicit 7z extraction publishes into chosen folder");
+        check(new String(java.nio.file.Files.readAllBytes(note.toPath()),java.nio.charset.StandardCharsets.UTF_8)
+                .equals("Note from a synthetic 7z fixture.\n"),"Unicode path and exact archive content");
+        check(new File(destination,"empty-dir").isDirectory(),"empty folders preserved");
+        close(activity);
+        ArchiveExtraction.removeStaging(destination.toPath());
+        check(fixtureDescriptors()==0,"7z viewer and extraction close their descriptors");
+    }
+
+    private void extractStreamArchives() throws Exception {
+        byte[] content = {8, 14, 26};
+        for (String suffix : new String[]{".tar", ".tar.gz", ".tgz", ".gz"}) {
+            String stem = "example" + suffix.replace(".", "-") + ".txt";
+            String filename = stem + suffix;
+            File source = new File(fixture,filename);
+            try (java.io.OutputStream raw = new FileOutputStream(source);
+                 java.io.OutputStream output = suffix.endsWith("gz") ? new java.util.zip.GZIPOutputStream(raw) : raw) {
+                if (suffix.equals(".gz")) output.write(content);
+                else writeTestTar(output,"Folder/Note.txt",content);
+            }
+            FileViewerActivity activity = open(issue(source),filename);
+            File destination = new File(fixture,stem);
+            File note = new File(destination,suffix.equals(".gz") ? stem : "Folder/Note.txt");
+            check(!destination.exists(),"opening " + suffix + " does not extract");
+            if(!suffix.equals(".gz"))main(()->{
+                TarArchiveListing.Listing members=(TarArchiveListing.Listing)field(field(activity,"shown"),"tar");
+                check(members!=null&&members.stop==TarArchiveListing.Stop.COMPLETE&&members.entries.size()==1
+                        &&members.entries.get(0).name.equals("Folder/Note.txt")&&members.entries.get(0).size==3,
+                        "native TAR listing shows actual names and sizes without extracting "+suffix);
+            });
+            click(activity,"Extract all…");
+            setExtractDestination(activity);
+            confirmExtraction(activity);
+            await(()->extractNotice(activity).startsWith("Extracted to "),45000,"explicit extraction finishes for " + suffix);
+            check(java.util.Arrays.equals(java.nio.file.Files.readAllBytes(note.toPath()),content),
+                    "output contains the exact bytes for " + suffix);
+            close(activity);
+            ArchiveExtraction.removeStaging(destination.toPath());
+        }
+        File evil = new File(fixture,"escape.tar");
+        try (FileOutputStream output = new FileOutputStream(evil)) {
+            // Hide a malformed path after the listing cap; explicit Extract must still revalidate every record.
+            for(int i=0;i<TarArchiveListing.MAX_ENTRIES;i++)writeTestTarRecord(output,"first-"+i,new byte[0]);
+            writeTestTar(output,"../outside.txt",content);
+        }
+        FileViewerActivity bad = open(issue(evil),evil.getName());
+        click(bad,"Extract all…");
+        setExtractDestination(bad);
+        confirmExtraction(bad);
+        await(()->extractNotice(bad).contains("unsafe"),45000,"unsafe TAR is rejected through viewer");
+        check(!new File(fixture,"escape").exists()&&!new File(fixture,"outside.txt").exists(),
+                "unsafe TAR publishes nothing to destination");
+        close(bad);
+        check(fixtureDescriptors()==0,"TAR/GZIP previews close their file descriptors");
+    }
+
+    private static void writeTestTar(java.io.OutputStream output,String name,byte[] content) throws IOException {
+        writeTestTarRecord(output,name,content);
+        output.write(new byte[1024]);
+    }
+
+    private static void writeTestTarRecord(java.io.OutputStream output,String name,byte[] content) throws IOException {
+        byte[] header = new byte[512];
+        putTestTar(header,0,name);
+        putTestTar(header,100,"0000644");
+        putTestTar(header,124,String.format(java.util.Locale.ROOT,"%011o",content.length));
+        java.util.Arrays.fill(header,148,156,(byte)' ');
+        header[156]='0';
+        putTestTar(header,257,"ustar\00000");
+        int checksum=0;
+        for(byte value:header)checksum+=value&255;
+        putTestTar(header,148,String.format(java.util.Locale.ROOT,"%06o\0 ",checksum));
+        output.write(header);
+        output.write(content);
+        output.write(new byte[(512-content.length%512)%512]);
+    }
+
+    private static void putTestTar(byte[] target,int offset,String value) {
+        byte[] bytes=value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        System.arraycopy(bytes,0,target,offset,bytes.length);
+    }
+
+    private void confirmExtraction(FileViewerActivity activity) {
+        main(()->{
+            AppSheet sheet=(AppSheet)field(activity,"activeSheet");
+            check(sheet!=null&&sheet.isShowing(),"archive confirmation sheet is visible");
+            Button confirm=button(sheet.actions,"Extract here");
+            check(confirm!=null&&confirm.isEnabled()&&confirm.performClick(),"activate the archive confirmation button");
+        });
+        waitForIdleSync();
+    }
+
+    private void setExtractDestination(FileViewerActivity activity) {
+        main(()->{
+            AppSheet sheet = (AppSheet)field(activity,"activeSheet");
+            EditText destination = find(sheet.content,EditText.class);
+            destination.setText(fixture.getPath());
+        });
+    }
+
+    private String extractNotice(FileViewerActivity activity) {
+        java.util.concurrent.atomic.AtomicReference<String> value = new java.util.concurrent.atomic.AtomicReference<>("");
+        main(()->value.set(((TextView)field(activity,"notice")).getText().toString()));
+        return value.get();
+    }
+
+    private void apkContents() throws Exception {
+        File apk = new File(fixture,"SyntheticPackage.apk");
+        String sample = "A <b>literal</b> asset";
+        try (java.util.zip.ZipFile source = new java.util.zip.ZipFile(target.getApplicationInfo().sourceDir);
+             java.util.zip.ZipOutputStream out = new java.util.zip.ZipOutputStream(new FileOutputStream(apk))) {
+            // Use the test application's build-time Android manifest/resources; all content
+            // read by this test is local synthetic data and the fixture never gets installed.
+            for(String entryName:new String[]{"AndroidManifest.xml","resources.arsc"}) {
+                java.util.zip.ZipEntry entry = source.getEntry(entryName);
+                if(entry==null)continue;
+                out.putNextEntry(new java.util.zip.ZipEntry(entryName));
+                try(java.io.InputStream in=source.getInputStream(entry)) {
+                    byte[] bytes=new byte[8192];for(int n;(n=in.read(bytes))!=-1;)out.write(bytes,0,n);
+                }
+                out.closeEntry();
+            }
+            out.putNextEntry(new java.util.zip.ZipEntry("assets/FixtureDoc.html"));
+            out.write(sample.getBytes(java.nio.charset.StandardCharsets.UTF_8));out.closeEntry();
+            out.putNextEntry(new java.util.zip.ZipEntry("classes.dex"));out.write(new byte[]{1,2,3});out.closeEntry();
+        }
+        FileViewerActivity viewer = open(issue(apk),apk.getName());
+        try {
+            click(viewer,"Browse package contents");
+            AtomicReference<AppSheet> contents=new AtomicReference<>();
+            AtomicReference<EditText> filter=new AtomicReference<>();
+            AtomicReference<ListView> list=new AtomicReference<>();
+            await(()->{
+                main(()->{
+                    AppSheet sheet=(AppSheet)field(viewer,"activeSheet");
+                    if(sheet!=null&&sheet.isShowing()) {
+                        contents.set(sheet);filter.set(find(sheet.content,EditText.class));list.set(find(sheet.content,ListView.class));
+                    }
+                });
+                return filter.get()!=null&&list.get()!=null&&filter.get().isEnabled();
+            },12000,"APK listing ready");
+            main(()->{
+                check(list.get().getCount()>=3,"APK contains platform files and synthetic asset");
+                check(button(contents.get().content,"Extract all…")==null&&button(contents.get().content,"Install APK")==null,
+                        "APK contents offers neither extraction nor installer");
+                filter.get().setText("FixtureDoc");
+                check(list.get().getCount()==1,"filter finds one package path");
+            });
+            main(()->{
+                ListView visible=list.get();
+                ZipDirectory.Entry asset=(ZipDirectory.Entry)visible.getItemAtPosition(0);
+                check("assets/FixtureDoc.html".equals(asset.name)
+                        &&visible.performItemClick(visible.getChildAt(0),0,visible.getItemIdAtPosition(0)),"activate the filtered HTML asset row");
+            });
+            await(()->{
+                AtomicBoolean visible=new AtomicBoolean();
+                main(()->visible.set(containsVisibleText(contents.get().content,sample)));
+                return visible.get();
+            },12000,"APK text stays literal in the read-only detail");
+            main(()->{
+                Button back=button(contents.get().content,"Back to package contents");
+                check(back!=null&&back.isShown()&&back.performClick(),"return to package contents from asset detail");
+                check(list.get().isShown()&&list.get().getCount()==1,"Back retains listing and filter");
+                filter.get().setText("classes.dex");
+                check(list.get().getCount()==1,"DEX filter reaches bytecode");
+            });
+            main(()->{
+                ListView visible=list.get();
+                ZipDirectory.Entry dex=(ZipDirectory.Entry)visible.getItemAtPosition(0);
+                check("classes.dex".equals(dex.name)&&visible.performItemClick(visible.getChildAt(0),0,visible.getItemIdAtPosition(0)),
+                        "activate the actual filtered DEX row rather than the OEM accessibility container");
+                check(containsVisibleText(contents.get().content,"Go back to the APK and use Browse DEX classes."),
+                        "DEX row is metadata-only and explains the separate tool");
+                Button back=button(contents.get().content,"Back to package contents");
+                check(back!=null&&back.performClick(),"return to package contents from DEX metadata");
+                filter.get().setText("AndroidManifest.xml");
+                check(list.get().getCount()==1,"manifest filter finds the actual compiled XML entry");
+            });
+            main(()->{
+                ListView visible=list.get();
+                ZipDirectory.Entry manifest=(ZipDirectory.Entry)visible.getItemAtPosition(0);
+                check("AndroidManifest.xml".equals(manifest.name)
+                        &&visible.performItemClick(visible.getChildAt(0),0,visible.getItemIdAtPosition(0)),
+                        "open the binary manifest row without installing the APK");
+            });
+            await(()->{
+                AtomicBoolean xmlShown=new AtomicBoolean();
+                main(()->xmlShown.set(containsVisibleTextFragment(contents.get().content,"<manifest ")
+                        &&containsVisibleTextFragment(contents.get().content,"package=\""+target.getPackageName()+"\"")
+                        &&containsVisibleTextFragment(contents.get().content,"</manifest>")));
+                return xmlShown.get();
+            },12000,"Android manifest is reconstructed as visible literal XML text");
+            main(()->{
+                Button back=button(contents.get().content,"Back to package contents");
+                check(back!=null&&back.performClick(),"return to package contents from decoded XML");
+                filter.get().setText("resources.arsc");
+                ListView visible=list.get();
+                check(visible.getCount()==1,"resource table filter reaches the actual APK table");
+                ZipDirectory.Entry resources=(ZipDirectory.Entry)visible.getItemAtPosition(0);
+                check("resources.arsc".equals(resources.name)
+                        &&visible.performItemClick(visible.getChildAt(0),0,visible.getItemIdAtPosition(0)),
+                        "open the compiled resource table row");
+            });
+            await(()->{
+                AtomicBoolean resourcesShown=new AtomicBoolean();
+                main(()->resourcesShown.set(containsVisibleTextFragment(contents.get().content,"Compiled resources · read only")
+                        &&containsVisibleTextFragment(contents.get().content,"0x7f")
+                        &&containsVisibleTextFragment(contents.get().content,":drawable/")));
+                return resourcesShown.get();
+            },12000,"compiled resource table presents verified type and entry names");
+        } finally { close(viewer); }
+    }
+
+    private static boolean containsVisibleTextFragment(View root,String expected){
+        if(!root.isShown())return false;
+        if(root instanceof TextView&&((TextView)root).getText().toString().contains(expected))return true;
+        if(root instanceof ViewGroup)for(int i=0;i<((ViewGroup)root).getChildCount();i++)
+            if(containsVisibleTextFragment(((ViewGroup)root).getChildAt(i),expected))return true;
+        return false;
+    }
+
+    private static boolean containsVisibleText(View root,String expected) {
+        if(!root.isShown())return false;
+        if(root instanceof TextView&&expected.contentEquals(((TextView)root).getText()))return true;
+        if(root instanceof ViewGroup)for(int i=0;i<((ViewGroup)root).getChildCount();i++)
+            if(containsVisibleText(((ViewGroup)root).getChildAt(i),expected))return true;
+        return false;
+    }
+
+    private void apkActions() throws Exception {
+        File apk = new File(fixture,"Synthetic.apk");
+        java.nio.file.Files.copy(new File(target.getApplicationInfo().sourceDir).toPath(),apk.toPath());
+        // Match the explicit system handoff, not the preview's own content URI. On API 26
+        // a MIME-only monitor can also match a local preview Intent with no action.
+        ActivityMonitor blocked = new ActivityMonitor() {
+            @Override public ActivityResult onStartActivity(Intent intent) {
+                return Intent.ACTION_VIEW.equals(intent.getAction())
+                        && ApkInstallAction.MIME.equals(intent.getType())
+                        && intent.getData()!=null
+                        && (target.getPackageName()+".apk").equals(intent.getData().getAuthority())
+                        ? new ActivityResult(Activity.RESULT_CANCELED,null) : null;
+            }
+        };
+        addMonitor(blocked);
+        try {
+            FileViewerActivity activity = open(issue(apk),"Synthetic.apk");
+            check(blocked.getHits()==0,"opening APK never launches an installer");
+            main(()->{
+                Object result = field(activity,"shown");
+                ApkInstallAction.Details details = (ApkInstallAction.Details)field(result,"apk");
+                check(details.packageName.equals(target.getPackageName()),"viewer shows actual inspected APK");
+                check((button(content(activity),"Install APK")!=null)==ApkInstallAction.supported(),
+                        "explicit Install APK is visible only in supported editions");
+            });
+            click(activity,"Inspect APK");
+            AtomicReference<AppSheet> inspection=new AtomicReference<>();
+            await(()->{
+                main(()->{
+                    AppSheet current=(AppSheet)field(activity,"activeSheet");
+                    if(current!=null&&current.isShowing()&&containsVisibleText(current.content,"Split APK declarations"))inspection.set(current);
+                });
+                return inspection.get()!=null;
+            },12000,"read-only APK inspection sections ready");
+            main(()->{
+                AppSheet current=inspection.get();
+                check(containsVisibleText(current.content,"APK file SHA-256")
+                        &&containsVisibleText(current.content,"Requested permissions")
+                        &&containsVisibleText(current.content,"Signer certificate SHA-256")
+                        &&containsVisibleText(current.content,"Native library ABIs"),"APK inspector exposes all metadata sections");
+                check(button(current.content,"Install APK")==null&&blocked.getHits()==0,"inspecting does not offer or open the installer");
+                current.dismiss();
+            });
+            if(ApkInstallAction.supported()){
+                click(activity,"Install APK");
+                await(()->blocked.getHits()==1,6000,"explicit click reaches Android installer intent");
+            }
+            close(activity);
+        } finally { removeMonitor(blocked); }
+    }
+
+    private void unknownText() throws Exception {
+        File custom = new File(fixture,"Workshop.customtext");
+        java.nio.file.Files.write(custom.toPath(),"Plain custom note".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        Intent intent=FileViewerActivity.intent(target,issue(custom),custom.getName(),custom.getPath(),custom.length())
+                .putExtra(MARKER,true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        FileViewerActivity activity=(FileViewerActivity)startActivitySync(intent);
+        await(()->{
+            AtomicReference<Boolean> ready=new AtomicReference<>(false);
+            main(()->ready.set(button(content(activity),"Read as text")!=null));
+            return ready.get();
+        },12000,"unknown type offers explicit safe text mode");
+        click(activity,"Read as text");
+        await(()->snapshot(activity).ready,12000,"plain text fallback loads");
+        main(()->{
+            PreviewText.Result rendered=(PreviewText.Result)field(field(activity,"shown"),"text");
+            check("Plain custom note".equals(rendered.text),"unknown extension decoded as literal text");
+        });
+        close(activity);
+    }
+
+    private void codeText() throws Exception {
+        File source = new File(fixture,"viewer-script.ts");
+        String literal = "const name: string = \"hello\";\r\n// keep literal <script>\r\nexport { name };";
+        java.nio.file.Files.write(source.toPath(),literal.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        FileViewerActivity activity = open(issue(source),source.getName());
+        main(() -> {
+            ScrollView scroll=find(content(activity),ScrollView.class);
+            TextView body=find(scroll,TextView.class);
+            android.text.Spanned rendered=(android.text.Spanned)body.getText();
+            check(rendered.toString().contains("<script>"),"TypeScript source stays literal");
+            check(rendered.getSpans(0,rendered.length(),android.text.style.ForegroundColorSpan.class).length>=3,"code has colored spans");
+            check(rendered.getSpans(0,rendered.length(),CodePreviewStyle.LineNumber.class).length==3,"gutter has one number per logical line");
+            check(!containsClass(content(activity),"android.webkit.WebView"),"native source does not run code");
+            check(button(content(activity),"Syntax: JavaScript / TypeScript · Auto")!=null,"extension selects TypeScript automatically");
+        });
+        main(()->{
+            View copy=description(content(activity),"Copy text");
+            check(copy!=null&&copy.performClick(),"activate the visible Copy text control");
+            android.content.ClipboardManager copied=activity.getSystemService(android.content.ClipboardManager.class);
+            check(literal.equals(copied.getPrimaryClip().getItemAt(0).getText().toString()),"copy preserves CRLF without copied line numbers");
+        });
+        close(activity);
+        File transport = new File(fixture,"fixture-transport.ts");
+        byte[] packets = new byte[4*188];
+        for(int i=0;i<4;i++)packets[i*188]=0x47;
+        java.nio.file.Files.write(transport.toPath(),packets);
+        FileViewerActivity.PreviewCheck media=FileViewerActivity.checkForProbe(target,issue(transport),transport.getName(),0);
+        check(media.mediaDescriptor&&media.error==null,"transport stream .ts keeps media path");
+        File plain = new File(fixture,"example-code.txt");
+        java.nio.file.Files.write(plain.toPath(),"def f():\n  return 5".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        FileViewerActivity note = open(issue(plain),plain.getName());
+        main(()->{
+            TextView body=find(find(content(note),ScrollView.class),TextView.class);
+            android.text.Spanned rendered=(android.text.Spanned)body.getText();
+            check(rendered.getSpans(0,rendered.length(),android.text.style.ForegroundColorSpan.class).length==0,"ordinary TXT has no synthetic colors");
+            check(rendered.getSpans(0,rendered.length(),CodePreviewStyle.LineNumber.class).length==2,"ordinary TXT keeps line numbers");
+        });
+        click(note,"Syntax: Plain text · Auto");
+        clickPopupItem("Python");
+        await(()->{
+            AtomicBoolean result=new AtomicBoolean();
+            main(()->{if(field(note,"pending")==null&&button(content(note),"Syntax: Python")!=null)result.set(true);});
+            return result.get();
+        },12000,"TXT language changes to Python");
+        main(()->{
+            TextView body=find(find(content(note),ScrollView.class),TextView.class);
+            android.text.Spanned rendered=(android.text.Spanned)body.getText();
+            check(rendered.getSpans(0,rendered.length(),android.text.style.ForegroundColorSpan.class).length>=3,"override colors Python in .txt");
+        });
+        FileViewerActivity rotated=rotate(note);
+        main(()->check(button(content(rotated),"Syntax: Python")!=null,"language override survives rotation"));
+        close(rotated);
+    }
+
+
+    private void officeSummary() throws Exception {
+        File word = new File(fixture,"sample-notes.docx");
+        String ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        try (java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(new java.io.FileOutputStream(word))) {
+            zip.putNextEntry(new java.util.zip.ZipEntry("word/document.xml"));
+            String body = "<w:document xmlns:w=\"" + ns + "\"><w:body><w:p><w:r><w:t>Review timeline &amp; actions</w:t></w:r></w:p></w:body></w:document>";
+            zip.write(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));zip.closeEntry();
+        }
+        FileViewerActivity activity = open(issue(word),word.getName());
+        main(()->{
+            check(button(content(activity),"Open in another app")!=null,"Office preview retains Open in another app");
+            check(!containsClass(content(activity),"android.webkit.WebView"),"Office preview is native and read-only");
+            OfficePreview.Result parsed=(OfficePreview.Result)field(field(activity,"shown"),"office");
+            check(parsed.sections.size()==1&&"Review timeline & actions".equals(parsed.sections.get(0).text),"DOCX displays text with safe XML escapes");
+            check(ExternalFileActions.mimeFor(word.getName()).equals(OfficePreview.mime(OfficePreview.Format.WORD)),"handler receives actual Office MIME");
+        });
+        close(activity);
+        String storage="http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        String relation="http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        String packageNs="http://schemas.openxmlformats.org/package/2006/relationships";
+        String slides="http://schemas.openxmlformats.org/presentationml/2006/main";
+        String drawing="http://schemas.openxmlformats.org/drawingml/2006/main";
+        File workbook=new File(fixture,"field-workbook.xlsx");
+        officeFixture(workbook,
+            "xl/workbook.xml","<workbook xmlns='"+storage+"' xmlns:r='"+relation+"'><sheets><sheet name='Field test' r:id='s'/></sheets></workbook>",
+            "xl/_rels/workbook.xml.rels","<Relationships xmlns='"+packageNs+"'><Relationship Id='s' Type='"+relation+"/worksheet' Target='worksheets/result.xml'/></Relationships>",
+            "xl/worksheets/result.xml","<worksheet xmlns='"+storage+"'><sheetData><row r='7'><c r='A7' t='inlineStr'><is><t>Passes</t></is></c><c r='B7'><f>1+2</f><v>3</v></c></row></sheetData></worksheet>");
+        FileViewerActivity sheet=open(issue(workbook),workbook.getName());
+        main(()->{
+            OfficePreview.Result data=(OfficePreview.Result)field(field(sheet,"shown"),"office");
+            check(data.sections.size()==1&&data.sections.get(0).title.equals("Field test"),"XLSX opens its named worksheet");
+            String row=data.sections.get(0).text;
+            check(row.contains("7   A Passes")&&row.contains("B 3")&&!row.contains("1+2"),"XLSX shows cached cells without executing a formula");
+            check(ExternalFileActions.mimeFor(workbook.getName()).equals(OfficePreview.mime(data.format)),"XLSX handler MIME");
+        });
+        close(sheet);
+        File presentation=new File(fixture,"field-brief.pptx");
+        officeFixture(presentation,
+            "ppt/presentation.xml","<p:presentation xmlns:p='"+slides+"' xmlns:r='"+relation+"'><p:sldIdLst><p:sldId id='10' r:id='slide'/></p:sldIdLst></p:presentation>",
+            "ppt/_rels/presentation.xml.rels","<Relationships xmlns='"+packageNs+"'><Relationship Id='slide' Type='"+relation+"/slide' Target='slides/slide9.xml'/></Relationships>",
+            "ppt/slides/slide9.xml","<p:sld xmlns:p='"+slides+"' xmlns:a='"+drawing+"'><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Next steps</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>");
+        FileViewerActivity slide=open(issue(presentation),presentation.getName());
+        main(()->{
+            OfficePreview.Result data=(OfficePreview.Result)field(field(slide,"shown"),"office");
+            check(data.sections.size()==1&&data.sections.get(0).title.equals("Slide 1")
+                    &&data.sections.get(0).text.equals("Next steps"),"PPTX follows presentation order and displays slide text");
+            check(ExternalFileActions.mimeFor(presentation.getName()).equals(OfficePreview.mime(data.format)),"PPTX handler MIME");
+        });
+        close(slide);
+    }
+
+    private static void officeFixture(File file,String... entries)throws IOException {
+        try(java.util.zip.ZipOutputStream zip=new java.util.zip.ZipOutputStream(new FileOutputStream(file))){
+            for(int i=0;i<entries.length;i+=2){
+                zip.putNextEntry(new java.util.zip.ZipEntry(entries[i]));
+                zip.write(entries[i+1].getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                zip.closeEntry();
+            }
+        }
+    }
+
 
     private boolean archivePage(FileViewerActivity activity, int number) {
         AtomicReference<Boolean> ready = new AtomicReference<>(false);
@@ -492,12 +1316,49 @@ public final class PreviewUiProbe extends Instrumentation {
             .append("; controllerFocus=").append(control!=null&&control.hasWindowFocus()).append('.').append('\n');});}
     private void repeatedCleanup() throws Exception {
         awaitIdleWorker(); int baseline = descriptors();
+        reportFixtureDescriptors("lifecycle baseline");
         for (int i = 0; i < 4; i++) {
-            FileViewerActivity image = open(imageUri, "synthetic.png"); close(image); FileViewerActivity pdf = open(pdfUri, "three-pages.pdf"); close(pdf);
-            FileViewerActivity audio = open(wavUri, "silent.wav"); await(() -> snapshot(audio).prepared, 15000, "repeated media prepares"); close(audio);
+            FileViewerActivity image = open(imageUri, "synthetic.png"); close(image);
+            reportFixtureDescriptors("after PNG close " + (i+1));
+            FileViewerActivity pdf = open(pdfUri, "three-pages.pdf"); close(pdf);
+            reportFixtureDescriptors("after PDF close " + (i+1));
+            FileViewerActivity audio = open(wavUri, "silent.wav");
+            await(() -> snapshot(audio).prepared, 15000, "repeated media prepares"); close(audio);
+            reportFixtureDescriptors("after WAV close " + (i+1));
         }
-        check(fixtureDescriptors() == 0, "repeated opens leave no fixture descriptor"); check(descriptors() <= baseline + 6, "process descriptor count stays bounded after warmup");
-        check(worker().getActiveCount() == 0 && worker().getQueue().isEmpty() && worker().getPoolSize() <= 1, "preview executor stays idle and bounded");
+        File rotated = new File(fixture,"rotated.jpg");
+        FileViewerActivity jpeg = open(issue(rotated),rotated.getName());
+        check((Integer)member(field(jpeg,"shown"),"orientation")==6,"owned EXIF stream preserves JPEG rotation");
+        close(jpeg);
+        reportFixtureDescriptors("after oriented JPEG close");
+
+        if(Build.VERSION.SDK_INT<28) {
+            File png = new File(fixture,"synthetic.png");
+            // Exercise the same bounded thumbnail decoder used by cells, independently
+            // of the file viewer and the disk/memory thumbnail cache.
+            java.lang.reflect.Method decode=ThumbnailLoader.class.getDeclaredMethod("decode",FileEntry.class,
+                    int.class,boolean.class,boolean.class);
+            decode.setAccessible(true);
+            try(ThumbnailLoader loader=new ThumbnailLoader(target)) {
+                Bitmap bitmap=(Bitmap)decode.invoke(loader,new FileEntry(png.getPath(),false,png.length(),png.lastModified()),
+                        96,false,false);
+                try { check(bitmap!=null,"Android 8 thumbnail decodes PNG through owned EXIF stream"); }
+                finally { if(bitmap!=null)bitmap.recycle(); }
+            }
+            reportFixtureDescriptors("after legacy PNG thumbnail");
+        }
+
+        // Let legitimate asynchronous media teardown settle, not GC. A descriptor
+        // routed to the wrong owner will still be open and fail with its fixture name.
+        long deadline=SystemClock.elapsedRealtime()+2000;
+        List<String> remaining=fixtureDescriptorNames();
+        while(!remaining.isEmpty()&&SystemClock.elapsedRealtime()<deadline) {
+            SystemClock.sleep(50); remaining=fixtureDescriptorNames();
+        }
+        reportFixtureDescriptors("after bounded settle");
+        check(remaining.isEmpty(),"repeated opens leave no fixture descriptor: "+remaining);
+        check(descriptors()<=baseline+6,"process descriptor count stays bounded after warmup");
+        check(worker().getActiveCount()==0&&worker().getQueue().isEmpty()&&worker().getPoolSize()<=1,"preview executor stays idle and bounded");
     }
     private void lateDelivery() throws Exception {
         FileViewerActivity activity = open(imageUri, "synthetic.png");
@@ -564,6 +1425,14 @@ public final class PreviewUiProbe extends Instrumentation {
             check(activity.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, key)), "Activity routes media key to native controller"); activity.dispatchKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, key));
         });
     }
+    private static TextView exactText(View view,String value){
+        if(view instanceof TextView&&value.contentEquals(((TextView)view).getText()))return (TextView)view;
+        if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++){
+            TextView child=exactText(((ViewGroup)view).getChildAt(i),value);
+            if(child!=null)return child;
+        }
+        return null;
+    }
     private void click(FileViewerActivity activity, String label) {
         main(() -> { Button button = button(content(activity), label); check(button != null && button.isEnabled(), "enabled " + label + " control exists"); check(button.performClick(), "activate " + label); });
     }
@@ -618,7 +1487,7 @@ public final class PreviewUiProbe extends Instrumentation {
         }
     }
     private static Object field(Object owner, String name) {
-        try { Field field = FileViewerActivity.class.getDeclaredField(name); field.setAccessible(true); return field.get(owner); }
+        try { Field field = (owner == null ? FileViewerActivity.class : owner.getClass()).getDeclaredField(name); field.setAccessible(true); return field.get(owner); }
         catch (ReflectiveOperationException failure) { throw new AssertionError("Viewer field unavailable: " + name, failure); }
     }
     private static ThreadPoolExecutor worker() { return (ThreadPoolExecutor) field(null, "PREVIEWS"); }
@@ -646,6 +1515,14 @@ public final class PreviewUiProbe extends Instrumentation {
         if (type.isInstance(root)) return type.cast(root);
         if (root instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) root).getChildCount(); i++) { T match = find(((ViewGroup) root).getChildAt(i), type); if (match != null) return match; } return null;
     }
+    private static View description(View root,String label){
+        if(root.getContentDescription()!=null&&label.contentEquals(root.getContentDescription()))return root;
+        if(root instanceof ViewGroup)for(int i=0;i<((ViewGroup)root).getChildCount();i++){
+            View match=description(((ViewGroup)root).getChildAt(i),label);
+            if(match!=null)return match;
+        }
+        return null;
+    }
     private static Button button(View root, String label) {
         if (root instanceof Button && label.contentEquals(((Button) root).getText())) return (Button) root;
         if (root instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) root).getChildCount(); i++) { Button match = button(((ViewGroup) root).getChildAt(i), label); if (match != null) return match; } return null;
@@ -654,9 +1531,23 @@ public final class PreviewUiProbe extends Instrumentation {
         if (root.getClass().getName().equals(name)) return true;
         if (root instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) root).getChildCount(); i++) if (containsClass(((ViewGroup) root).getChildAt(i), name)) return true; return false;
     }
-    private int fixtureDescriptors() throws Exception {
-        int count = 0; File[] files = new File("/proc/self/fd").listFiles(); if (files == null) throw new IOException("Descriptor list unavailable.");
-        for (File fd : files) { String path; try { path = Os.readlink(fd.getPath()); } catch (Exception racedClose) { continue; } if (path.startsWith(fixture.getPath() + "/")) count++; } return count;
+    private int fixtureDescriptors() throws Exception { return fixtureDescriptorNames().size(); }
+    private List<String> fixtureDescriptorNames() throws Exception {
+        List<String> owned = new ArrayList<>();
+        File[] files = new File("/proc/self/fd").listFiles();
+        if(files==null)throw new IOException("Descriptor list unavailable.");
+        String prefix=fixture.getCanonicalPath()+"/";
+        for(File fd:files) {
+            String path;
+            try { path=Os.readlink(fd.getPath()); } catch(Exception racedClose) { continue; }
+            if(path.startsWith(prefix))owned.add(new File(path).getName());
+        }
+        java.util.Collections.sort(owned);
+        return owned;
+    }
+    private void reportFixtureDescriptors(String step)throws Exception {
+        List<String> owned=fixtureDescriptorNames();
+        report.append(step).append(": ").append(owned.size()).append(" fixture descriptor(s) ").append(owned).append((char)10);
     }
     private static int descriptors() throws IOException { String[] files = new File("/proc/self/fd").list(); if (files == null) throw new IOException("Descriptor list unavailable."); return files.length; }
     private static final class Tracker implements Application.ActivityLifecycleCallbacks {

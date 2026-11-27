@@ -23,5 +23,16 @@ final class NativeDiscovery {
     /** Match the JNI stamp precision even on older libcore NIO implementations. */
     static long modified(android.system.StructStat stat){return android.os.Build.VERSION.SDK_INT>=27?stat.st_mtim.tv_sec*1000+stat.st_mtim.tv_nsec/1000000:stat.st_mtime*1000;}
     static boolean availableForProbe(){return available;}
+    static android.os.ParcelFileDescriptor pin(int directory,String path)throws java.io.IOException {
+        if(!available)throw new java.io.IOException("Safe live Root metadata helper unavailable.");
+        int fd=pinDirectory(directory,path.getBytes(StandardCharsets.UTF_8));
+        if(fd<0)throw new java.io.IOException("Live Root directory changed or is unavailable.");
+        return android.os.ParcelFileDescriptor.adoptFd(fd);
+    }
+    static long[] pinnedMetadata(int directory,String relative){
+        return statRelative(directory,relative.getBytes(StandardCharsets.UTF_8));
+    }
+    private static native int pinDirectory(int directory,byte[] path);
+    private static native long[] statRelative(int directory,byte[] path);
     private static native long[] stamps(byte[][] paths);
 }

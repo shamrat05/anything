@@ -1,33 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="BaseAppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:fontFamily">@font/aeonik</item>
-        <item name="android:colorAccent">#1A2FFB</item>
+        <item name="android:fontFamily">@font/inter</item>
+        <item name="android:colorAccent">#155CCE</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:statusBarColor">#F0F1FA</item>
-        <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:statusBarColor">#E6EEFB</item>
+        <item name="android:navigationBarColor">#F2F6FD</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:windowBackground">#FFFFFF</item>
-        <item name="android:colorBackground">#FFFFFF</item>
+        <item name="android:windowBackground">#F2F6FD</item>
+        <item name="android:colorBackground">#F2F6FD</item>
         <item name="android:popupMenuStyle">@style/LightPopupMenu</item>
         <item name="android:alertDialogTheme">@style/LightAppAlert</item>
         <item name="android:fastScrollThumbDrawable">@drawable/fast_scroll_thumb</item>
         <item name="android:fastScrollTrackDrawable">@drawable/fast_scroll_track</item>
         <item name="android:fastScrollPreviewBackgroundLeft">@drawable/menu_surface_light</item>
         <item name="android:fastScrollPreviewBackgroundRight">@drawable/menu_surface_light</item>
-        <item name="android:fastScrollTextColor">#202020</item>
+        <item name="android:fastScrollTextColor">#14243B</item>
         <item name="android:fastScrollOverlayPosition">atThumb</item>
     </style>
     <style name="AppTheme" parent="BaseAppTheme" />
     <style name="DarkAppTheme" parent="android:style/Theme.Material.NoActionBar">
-        <item name="android:fontFamily">@font/aeonik</item>
+        <item name="android:fontFamily">@font/inter</item>
         <item name="android:colorAccent">#9DAAFF</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:statusBarColor">#20232E</item>
-        <item name="android:navigationBarColor">#14161D</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:windowBackground">#14161D</item>
-        <item name="android:colorBackground">#14161D</item>
+        <item name="android:windowBackground">#000000</item>
+        <item name="android:colorBackground">#000000</item>
         <item name="android:popupMenuStyle">@style/DarkPopupMenu</item>
         <item name="android:alertDialogTheme">@style/DarkAppAlert</item>
         <item name="android:fastScrollThumbDrawable">@drawable/fast_scroll_thumb</item>
@@ -39,15 +39,15 @@
     </style>
     <style name="LightAppAlert" parent="android:style/Theme.Material.Light.Dialog.Alert">
         <item name="android:windowBackground">@drawable/menu_surface_light</item>
-        <item name="android:fontFamily">@font/aeonik</item>
-        <item name="android:textColorPrimary">#202020</item>
-        <item name="android:textColorSecondary">#60656B</item>
-        <item name="android:colorAccent">#1A2FFB</item>
-        <item name="android:colorControlHighlight">#141A2FFB</item>
+        <item name="android:fontFamily">@font/inter</item>
+        <item name="android:textColorPrimary">#14243B</item>
+        <item name="android:textColorSecondary">#4C607C</item>
+        <item name="android:colorAccent">#155CCE</item>
+        <item name="android:colorControlHighlight">#24155CCE</item>
     </style>
     <style name="DarkAppAlert" parent="android:style/Theme.Material.Dialog.Alert">
         <item name="android:windowBackground">@drawable/menu_surface_dark</item>
-        <item name="android:fontFamily">@font/aeonik</item>
+        <item name="android:fontFamily">@font/inter</item>
         <item name="android:textColorPrimary">#F2F3F8</item>
         <item name="android:textColorSecondary">#ACB1C1</item>
         <item name="android:colorAccent">#9DAAFF</item>
@@ -55,8 +55,8 @@
     </style>
     <style name="LightPopupTheme" parent="AppTheme">
         <item name="android:popupMenuStyle">@style/LightPopupMenu</item>
-        <item name="android:textColorPrimary">#202020</item>
-        <item name="android:colorControlHighlight">#141A2FFB</item>
+        <item name="android:textColorPrimary">#14243B</item>
+        <item name="android:colorControlHighlight">#24155CCE</item>
     </style>
     <style name="DarkPopupTheme" parent="DarkAppTheme">
         <item name="android:popupMenuStyle">@style/DarkPopupMenu</item>
@@ -70,15 +70,15 @@
         <item name="android:popupBackground">@drawable/menu_surface_dark</item>
     </style>
     <style name="LightMenuDialog" parent="android:style/Theme.Material.Light.Dialog.NoActionBar">
-        <item name="android:fontFamily">@font/aeonik</item>
-        <item name="android:colorAccent">#1A2FFB</item>
-        <item name="android:colorControlHighlight">#141A2FFB</item>
+        <item name="android:fontFamily">@font/inter</item>
+        <item name="android:colorAccent">#155CCE</item>
+        <item name="android:colorControlHighlight">#24155CCE</item>
         <item name="android:backgroundDimEnabled">false</item>
         <item name="android:windowMinWidthMajor">0dp</item>
         <item name="android:windowMinWidthMinor">0dp</item>
     </style>
     <style name="DarkMenuDialog" parent="android:style/Theme.Material.Dialog.NoActionBar">
-        <item name="android:fontFamily">@font/aeonik</item>
+        <item name="android:fontFamily">@font/inter</item>
         <item name="android:colorAccent">#9DAAFF</item>
         <item name="android:colorControlHighlight">#249DAAFF</item>
         <item name="android:backgroundDimEnabled">false</item>

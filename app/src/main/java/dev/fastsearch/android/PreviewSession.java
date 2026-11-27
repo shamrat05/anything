@@ -24,7 +24,7 @@ final class PreviewSession {
         this.entries=Collections.unmodifiableList(files);
     }
     static synchronized PreviewSession create(List<FileEntry> entries, String path, boolean root) {
-        expire(); while (ACTIVE.size()>=2) ACTIVE.remove(ACTIVE.keySet().iterator().next());
+        expire(); while (ACTIVE.size()>=8) ACTIVE.remove(ACTIVE.keySet().iterator().next());
         PreviewSession session = new PreviewSession(entries,path,root); ACTIVE.put(session.id,session); return session;
     }
     static synchronized PreviewSession get(String id) { expire(); return ACTIVE.get(id); }

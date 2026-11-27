@@ -27,8 +27,8 @@ final class LoadingSkeleton extends View {
         super(context); this.style = style;
         theme=UiTheme.resolve(context);setBackgroundColor(theme.surface); setContentDescription("Loading");
         brandMark=context.getDrawable(R.drawable.ic_launcher_foreground);
-        brandTitle=getResources().getFont(R.font.aeonik_medium);
-        brandCaption=getResources().getFont(R.font.aeonik_regular);
+        brandTitle=getResources().getFont(R.font.inter_medium);
+        brandCaption=getResources().getFont(R.font.inter_regular);
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
     }
     void setStyle(int next){if(style!=next){style=next;invalidate();}}

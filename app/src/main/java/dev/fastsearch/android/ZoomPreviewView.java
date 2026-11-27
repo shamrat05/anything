@@ -149,6 +149,8 @@ final class ZoomPreviewView extends View {
         canvas.restoreToCount(saved);
     }
 
+    boolean isMagnified(){return zoom>1.05f||pinch.isInProgress();}
+
     @Override public boolean onTouchEvent(MotionEvent event) {
         if (!hasImage()) return false;
         pinch.onTouchEvent(event); gestures.onTouchEvent(event);

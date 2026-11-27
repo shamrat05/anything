@@ -9,7 +9,11 @@ import android.widget.Toast;
 /** A captured selection is never deleted until this explicit confirmation is accepted. */
 final class FileDeletion {
     static AppSheet confirm(Activity activity,java.util.List<dev.fastsearch.core.FileEntry> entries,boolean root,java.util.concurrent.ExecutorService executor,Runnable accepted){
-        if (activity.isFinishing() || activity.isDestroyed()) return null;
+        return confirm(activity,entries,root,executor,accepted,()->true);
+    }
+    static AppSheet confirm(Activity activity,java.util.List<dev.fastsearch.core.FileEntry> entries,boolean root,
+            java.util.concurrent.ExecutorService executor,Runnable accepted,java.util.function.BooleanSupplier canDelete){
+        if (activity.isFinishing() || activity.isDestroyed() || entries.isEmpty()) return null;
         if (!root && Build.VERSION.SDK_INT <= 29
                 && activity.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                         != PackageManager.PERMISSION_GRANTED) {
@@ -27,7 +31,10 @@ final class FileDeletion {
         SelectionPreparation preparation=new SelectionPreparation();
         android.widget.ProgressBar preparing=new android.widget.ProgressBar(activity,null,android.R.attr.progressBarStyleHorizontal);preparing.setIndeterminate(true);preparing.setContentDescription("Preparing deletion");sheet.content.addView(preparing,new android.widget.LinearLayout.LayoutParams(-1,sheet.dp(2)));
         sheet.action("Cancel",false,false,null);android.widget.Button confirm=sheet.action("Checking files…",true,true,null);
-        confirm.setOnClickListener(view->{try{FileOperationService.delete(activity,preparation.snapshot);sheet.dismiss();accepted.run();}
+        confirm.setOnClickListener(view->{try{
+            if(!canDelete.getAsBoolean())throw new java.io.IOException("File access changed. Select the items again.");
+            if(preparation.snapshot==null)throw new java.io.IOException("The selection has not been verified.");
+            FileOperationService.delete(activity,preparation.snapshot);sheet.dismiss();accepted.run();}
             catch(Exception failure){Toast.makeText(activity,failure.getMessage(),Toast.LENGTH_LONG).show();}});
         confirm.setEnabled(false);confirm.setAlpha(.4f);sheet.show();preparation.start(sheet,entries,root,executor,()->{
             preparing.setVisibility(android.view.View.GONE);confirm.setText("Delete");confirm.setEnabled(preparation.snapshot!=null);confirm.setAlpha(preparation.snapshot!=null?1:.4f);

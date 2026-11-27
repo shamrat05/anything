@@ -33,6 +33,20 @@ final class ArchiveEntryFile {
         }
     }
 
+    interface Writer { void write(java.io.OutputStream output)throws Exception; }
+
+    static ParcelFileDescriptor write(Context context,long size,Writer writer)throws Exception{
+        if(size<0||size>MAX_BYTES)throw new IOException("This archive member exceeds the 32 MiB preview limit.");
+        try(ParcelFileDescriptor backing=openWritable(context)){
+            try(ParcelFileDescriptor.AutoCloseOutputStream output=new ParcelFileDescriptor.AutoCloseOutputStream(
+                    ParcelFileDescriptor.dup(backing.getFileDescriptor()))){
+                writer.write(output);
+            }
+            if(backing.getStatSize()!=size)throw new IOException("The archive member size did not match its directory.");
+            return ParcelFileDescriptor.open(new File("/proc/self/fd/"+backing.getFd()),ParcelFileDescriptor.MODE_READ_ONLY);
+        }
+    }
+
     private static ParcelFileDescriptor openWritable(Context context) throws Exception {
         if (Build.VERSION.SDK_INT >= 30) {
             FileDescriptor memory = Os.memfd_create("archive-entry", 0);

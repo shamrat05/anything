@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import struct
 import tempfile
 
 root = Path(__file__).resolve().parent.parent
@@ -41,6 +42,36 @@ def scan(path, *exclusions):
         check(int(modified) == metadata.st_mtime_ns // 1_000_000, 'exact independent millisecond timestamp')
         check(int(size) == (0 if mode[:1] == b'd' else metadata.st_size), 'exact size/type metadata')
         records[key] = mode[:1]
+    return records
+
+
+def protocol_records(source, packed):
+    records = {}
+    if packed:
+        header = struct.Struct('<cqqI')
+        offset = 0
+        while offset < len(source):
+            kind, size, modified, length = header.unpack_from(source, offset)
+            offset += header.size
+            check(0 < length <= 4095 and offset + length <= len(source), 'valid packed record length')
+            path = source[offset:offset + length]
+            offset += length
+            check(path not in records, 'each packed record emitted exactly once')
+            records[path] = kind, size, modified
+    else:
+        fields = source.split(b'\0')
+        for mode, size, modified, path in zip(fields[0::4], fields[1::4], fields[2::4], fields[3::4]):
+            records[path] = mode[:1], int(size), int(modified)
+    return records
+
+
+def compare_protocols(fixture, *options):
+    args = [str(binary), str(fixture)]
+    baseline = subprocess.run([*args, *options], capture_output=True, timeout=10, check=True)
+    packed = subprocess.run([*args, '--packed', *options], capture_output=True, timeout=10, check=True)
+    check(not baseline.stderr and not packed.stderr, 'both stream encodings traverse the same fixture without errors')
+    records = protocol_records(packed.stdout, True)
+    check(protocol_records(baseline.stdout, False) == records, 'packed mode preserves exact path/type/size/mtime')
     return records
 
 
@@ -98,6 +129,19 @@ with tempfile.TemporaryDirectory(prefix="rootindex-'[]* ") as temporary:
         expected.update((parent, leaf))
     for attempt in range(3):
         check(set(scan(parallel)) == expected, 'concurrent traversal emits every expected row once')
+    # Many workers contribute to the same tile; exact totals must not lose simultaneous updates.
+    for i in range(48):
+        parent = parallel / str(i)
+        (parent / '.hidden').write_bytes(b'hidden')
+        (parent / f'日本語-{i}\nfile').write_bytes(bytes(i))
+    for attempt in range(5):
+        for options, expected in [(('--map',), 48 * 13 + sum(range(48))),
+                                  (('--map-visible',), 48 * 7 + sum(range(48)))]:
+            records = compare_protocols(fixture, *options)
+            check(records[os.fsencode(parallel)][1] == expected, 'parallel folder totals stay exact across workers')
+    compare_protocols(fixture, '--children')
+    compare_protocols(fixture / 'loop', '--tree')
+    compare_protocols(fixture, str(nested))
     missing = subprocess.run([str(binary), str(fixture / 'missing')], capture_output=True, timeout=10)
     check(missing.returncode == 1 and not missing.stdout and bool(missing.stderr), 'missing root reports traversal error')
     invalid = subprocess.run([str(binary), 'relative'], capture_output=True, timeout=10)

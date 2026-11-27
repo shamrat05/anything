@@ -1,5 +1,10 @@
 package dev.fastsearch.android;
 
+import android.os.ParcelFileDescriptor;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructStat;
 import dev.fastsearch.core.FileEntry;
 import dev.fastsearch.core.FileEntryTable;
 import java.io.BufferedInputStream;
@@ -36,6 +41,9 @@ final class IndexReconciler {
     private final Set<String> excludes=new HashSet<>();
     private JSONArray updates=new JSONArray(),removals=new JSONArray();
     private boolean foldersOnly;
+    private String liveRootScope;
+    private ParcelFileDescriptor liveRootDirectory;
+    private long liveDevice,liveInode;
     private int checked,changed,denied,listed,pathChecks;
     private long notified;
     private IndexReconciler(Check check,Emit emit){this.check=check;this.emit=emit;}
@@ -59,6 +67,23 @@ final class IndexReconciler {
         JSONArray deniedPaths=request.getJSONArray("denied");for(int i=0;i<deniedPaths.length();i++)retry.add(deniedPaths.getString(i));
         JSONArray selected=request.optJSONArray("targets");
         if(selected!=null){targets=new HashSet<>();for(int i=0;i<selected.length();i++)targets.add(FileOperationWorker.requirePath(selected.getString(i)));}
+        if(request.has("liveRootScope")){
+            liveRootScope=request.getString("liveRootScope");
+            if(!request.optBoolean("root")||!IndexRootScanner.liveWatchScope(liveRootScope)||targets==null
+                    ||targets.isEmpty()||targets.size()>32)
+                throw new java.io.IOException("Invalid live Root update scope.");
+            for(String path:targets)if(!path.startsWith(liveRootScope+"/"))
+                throw new java.io.IOException("Live Root update is outside the open folder.");
+            liveDevice=request.getLong("liveRootDevice");liveInode=request.getLong("liveRootInode");
+            if(liveInode==0)throw new java.io.IOException("Invalid watched Root inode.");
+        }
+        try(ParcelFileDescriptor root=liveRootScope==null?null:NativeDiscovery.pin(-1,liveRootScope)){
+            liveRootDirectory=root;
+            requireLiveIdentity(root);
+            return update(request,snapshot);
+        }finally{liveRootDirectory=null;}
+    }
+    private JSONObject update(JSONObject request,List<FileEntry> snapshot)throws Exception{
         if(snapshot!=null){int count=0;for(FileEntry entry:snapshot){if((count++&255)==0)check.run();remember(entry);}}
         else try(DataInputStream input=new DataInputStream(new BufferedInputStream(new FileInputStream(request.getString("snapshot")),64*1024))){
             if(input.readInt()!=1)throw new java.io.IOException("Invalid index snapshot.");int count=input.readInt();
@@ -86,6 +111,9 @@ final class IndexReconciler {
         JSONArray parents=request.optJSONArray("parents");if(parents!=null)for(int i=0;i<parents.length();i++){
             String path=parents.getString(i);FileEntry fresh=stat(path);checked++;
             if(fresh!=null&&!sameNullable(known.get(path),fresh))update(fresh);}
+        if(liveRootDirectory!=null)try(ParcelFileDescriptor current=NativeDiscovery.pin(-1,liveRootScope)){
+            requireLiveIdentity(current);
+        }
         flush();return new JSONObject().put("changedRows",changed).put("checkedRows",targets==null?checked:pathChecks).put("listedDirectories",listed).put("accessErrors",denied);
     }
     private boolean targeted(String path){if(targets==null||targets.contains(path))return true;
@@ -95,24 +123,60 @@ final class IndexReconciler {
         if(!inside)return false;if(excludes.contains(path))return false;
         for(int slash=path.lastIndexOf('/');slash>0;slash=path.lastIndexOf('/',slash-1))if(excludes.contains(path.substring(0,slash)))return false;return true;}
     private boolean blocked(String path){if(!allowed(path))return true;for(String parent=path;!parent.isEmpty();){if(blocked.contains(parent))return true;int slash=parent.lastIndexOf('/');if(slash<=0)break;parent=parent.substring(0,slash);}return false;}
-    private FileEntry stat(String path)throws Exception{
-        check.run();if(!allowed(path))return null;
+    private void requireLiveIdentity(ParcelFileDescriptor directory)throws Exception{
+        if(directory==null)return;
+        StructStat info=Os.fstat(directory.getFileDescriptor());
+        if(info.st_dev!=liveDevice||info.st_ino!=liveInode)
+            throw new java.io.IOException("The watched Root directory changed.");
+    }
+    private String relative(String path){
+        return path.equals(liveRootScope)?"":path.substring(liveRootScope.length()+1);
+    }
+    private boolean inLiveScope(String path){
+        return liveRootDirectory==null||path.equals(liveRootScope)||path.startsWith(liveRootScope+"/");
+    }
+    private ParcelFileDescriptor pinListing(String path)throws java.io.IOException{
+        if(liveRootDirectory==null)return null;
+        if(!inLiveScope(path))throw new java.io.IOException("Live Root listing is outside the open folder.");
+        return NativeDiscovery.pin(liveRootDirectory.getFd(),relative(path));
+    }
+    private Path listingPath(String path,ParcelFileDescriptor handle){
+        return Paths.get(handle==null?path:"/proc/self/fd/"+handle.getFd());
+    }
+    private static String listedChild(String path,Path child,ParcelFileDescriptor handle){
+        return handle==null?child.toString():path+"/"+child.getFileName();
+    }
+    private FileEntry stat(String path)throws Exception{return stat(path,null);}
+    private FileEntry stat(String path,ParcelFileDescriptor parent)throws Exception{
+        check.run();if(!allowed(path)||!inLiveScope(path))return null;
         if(targets!=null)pathChecks++;
-        try{android.system.StructStat metadata=android.system.Os.lstat(path);boolean directory=android.system.OsConstants.S_ISDIR(metadata.st_mode);
-            if(!directory&&!android.system.OsConstants.S_ISREG(metadata.st_mode)){if(foldersOnly||known.get(path)!=null)remove(path);blocked.add(path);return null;}
-            return new FileEntry(path,directory,directory?0:metadata.st_size,NativeDiscovery.modified(metadata));
-        }catch(android.system.ErrnoException failure){
-            if(failure.errno==android.system.OsConstants.ENOENT||failure.errno==android.system.OsConstants.ENOTDIR){if(foldersOnly||known.get(path)!=null)remove(path);}
+        try{
+            long mode,size,modified;
+            if(liveRootDirectory!=null){
+                String name=parent==null?relative(path):path.substring(path.lastIndexOf('/')+1);
+                long[] row=NativeDiscovery.pinnedMetadata(parent==null?liveRootDirectory.getFd():parent.getFd(),name);
+                if(row==null||row.length!=4)throw new java.io.IOException("Safe live Root metadata was unavailable.");
+                if(row[0]<0)throw new ErrnoException("fstatat",(int)-row[0]);
+                mode=row[1];size=row[2];modified=row[3];
+            }else{
+                StructStat metadata=Os.lstat(path);
+                mode=metadata.st_mode;size=metadata.st_size;modified=NativeDiscovery.modified(metadata);
+            }
+            boolean directory=OsConstants.S_ISDIR((int)mode);
+            if(!directory&&!OsConstants.S_ISREG((int)mode)){if(foldersOnly||known.get(path)!=null)remove(path);blocked.add(path);return null;}
+            return new FileEntry(path,directory,directory?0:size,modified);
+        }catch(ErrnoException failure){
+            if(failure.errno==OsConstants.ENOENT||failure.errno==OsConstants.ENOTDIR){if(foldersOnly||known.get(path)!=null)remove(path);}
             else denied++;
             blocked.add(path);return null;
         }
     }
     private void list(String path)throws Exception{
         check.run();listed++;Set<String> seen=new HashSet<>();boolean complete=false;JSONArray names=new JSONArray();
-        try(DirectoryStream<Path> stream=Files.newDirectoryStream(Paths.get(path))){
-            for(Path child:stream){check.run();String name=child.toString();seen.add(name);
+        try(ParcelFileDescriptor pinned=pinListing(path);DirectoryStream<Path> stream=Files.newDirectoryStream(listingPath(path,pinned))){
+            for(Path child:stream){check.run();String name=listedChild(path,child,pinned);seen.add(name);
                 if(foldersOnly){names.put(child.getFileName().toString());if(names.length()>=256){listing(path,names,false);names=new JSONArray();}}
-                if(!allowed(name))continue;FileEntry fresh=stat(name);if(fresh==null)continue;
+                if(!allowed(name))continue;FileEntry fresh=stat(name,pinned);if(fresh==null)continue;
                 FileEntry old=known.get(name);if(old==null){if(fresh.directory)walk(name);else update(fresh);}else if(!same(old,fresh))update(fresh);}
             complete=true;
         }catch(AccessDeniedException denied){this.denied++;}catch(java.io.IOException unavailable){denied++;}
@@ -131,8 +195,8 @@ final class IndexReconciler {
         ArrayDeque<String> queue=new ArrayDeque<>();queue.add(root);
         while(!queue.isEmpty()){check.run();String path=queue.removeFirst();if(blocked(path))continue;FileEntry fresh=stat(path);if(fresh==null)continue;
             update(fresh);if(!fresh.directory)continue;listed++;
-            try(DirectoryStream<Path> stream=Files.newDirectoryStream(Paths.get(path))){for(Path child:stream){check.run();String name=child.toString();if(!allowed(name))continue;
-                FileEntry item=stat(name);if(item==null)continue;if(item.directory)queue.addLast(name);else update(item);}}
+            try(ParcelFileDescriptor pinned=pinListing(path);DirectoryStream<Path> stream=Files.newDirectoryStream(listingPath(path,pinned))){for(Path child:stream){check.run();String name=listedChild(path,child,pinned);if(!allowed(name))continue;
+                FileEntry item=stat(name,pinned);if(item==null)continue;if(item.directory)queue.addLast(name);else update(item);}}
             catch(AccessDeniedException denied){this.denied++;}catch(java.io.IOException unavailable){denied++;}progress();}
     }
     private static boolean same(FileEntry before,FileEntry after){return before.directory==after.directory&&before.size==after.size&&before.modified==after.modified;}

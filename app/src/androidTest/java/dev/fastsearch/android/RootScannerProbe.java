@@ -25,12 +25,13 @@ public final class RootScannerProbe extends Instrumentation {
     private File fixture, markers;
     private String executable, launcher;
     private int assertions;
-    private boolean privileged;
+    private boolean privileged,liveOnly;
     private final StringBuilder report = new StringBuilder();
 
     @Override public void onCreate(Bundle arguments) {
         super.onCreate(arguments);
         privileged = arguments != null && "true".equals(arguments.getString("root"));
+        liveOnly = arguments != null && "live".equals(arguments.getString("phase"));
         start();
     }
 
@@ -40,7 +41,7 @@ public final class RootScannerProbe extends Instrumentation {
             target = getTargetContext();
             foreground = startActivitySync(new Intent(target, ProbeActivity.class)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            exercise();
+            if(liveOnly) liveWatch(); else exercise();
             passed = true;
         } catch (Throwable failure) {
             java.io.StringWriter trace = new java.io.StringWriter();
@@ -96,7 +97,9 @@ public final class RootScannerProbe extends Instrumentation {
             }
             check(found.containsKey(privateChild.getPath()), "nested/protected child discovered");
             check(found.get(fixture.getPath()).directory && found.get(nested.getPath()).directory, "folders included");
-            check(found.get(fixture.getPath()).modified == NativeDiscovery.modified(Os.lstat(fixture.getPath())),
+            check(NativeDiscovery.availableForProbe(), "packaged incremental discovery library is loaded");
+            check(found.get(fixture.getPath()).modified == NativeDiscovery.modified(
+                            java.util.Collections.singletonList(fixture.getPath()))[0],
                     "initial folder precision matches incremental native stamps");
             check(!found.containsKey(new File(fixture, "loop").getPath()), "symlink loop excluded");
             check(!found.containsKey(new File(fixture, "pipe").getPath()), "FIFO excluded without opening");
@@ -107,6 +110,31 @@ public final class RootScannerProbe extends Instrumentation {
             if (privileged) command("chown " + Os.getuid() + ":" + Os.getgid() + " "
                     + IndexRootScanner.quote(nested.getPath()) + " && chmod 0700 " + IndexRootScanner.quote(nested.getPath()));
         }
+
+        File mapped = new File(fixture, "parallel-map");
+        check(mapped.mkdir(), "create isolated map fixture");
+        long expectedBytes = 0;
+        for (int n = 1; n <= 64; n++) {
+            File leaf = new File(mapped, "child-" + n);
+            if (!leaf.mkdir()) throw new IOException("Could not create map folder.");
+            try (FileOutputStream output = new FileOutputStream(new File(leaf, "visible.txt"))) {
+                output.write(new byte[n]);
+            }
+            try (FileOutputStream output = new FileOutputStream(new File(leaf, ".hidden"))) {
+                output.write(1);
+            }
+            expectedBytes += n;
+        }
+        for (boolean showHidden : new boolean[]{true, false}) {
+            Map<String, Long> sizes = new HashMap<>();
+            IndexRootScanner.Result result = scanner(executable).scanMap((path, directory, size, modified) ->
+                    sizes.put(path, size), fixture.getPath(), showHidden);
+            check(sizes.get(mapped.getPath()) == expectedBytes + (showHidden ? 64 : 0),
+                    "native parallel map preserves exact nested totals and hidden setting");
+            check(!sizes.containsKey(new File(mapped, "child-1").getPath()), "packed map streams immediate tiles only");
+            check(result.accessErrors == 0 && result.otherErrors == 0, "bounded map completed without traversal errors");
+        }
+        check(markers.list().length == 0, "map sessions clean markers");
 
         // A command failure after a valid session must never ask for another root grant.
         assertTraversalFailure(scanner(executable + ".missing"), fixture.getPath());
@@ -158,6 +186,69 @@ public final class RootScannerProbe extends Instrumentation {
         report.append("API ").append(android.os.Build.VERSION.SDK_INT).append("; privileged=").append(privileged)
                 .append("; system find -printf exit=").append(find.exitValue())
                 .append("; native initial scan passed independently.\n");
+    }
+
+    private void liveWatch() throws Exception {
+        String token="RootScannerLive-"+SystemClock.elapsedRealtimeNanos();
+        fixture=new File(target.getCacheDir(),token).getCanonicalFile();
+        markers=new File(target.getCacheDir(),token+"-markers");
+        check(fixture.mkdir()&&markers.mkdir(),"create owned foreground watcher fixture");
+        executable=new File(target.getApplicationInfo().nativeLibraryDir,"librootindex.so").getPath();
+        launcher=privileged?IndexRootScanner.suBinary():"/system/bin/sh";
+        File nested=new File(fixture,"selected child");
+        check(nested.mkdir(),"owned map candidate");
+        File changed=new File(nested,"synthetic 🧪.txt");
+        IndexRootScanner monitor=scanner(executable);
+        java.util.concurrent.FutureTask<IndexRootScanner.LiveChanges> events=
+                new java.util.concurrent.FutureTask<>(()->monitor.watch(fixture.getPath(),java.util.Collections.singletonList(nested.getPath())));
+        Thread watch=new Thread(events,"Root-live-probe");
+        watch.start();
+        long begin=SystemClock.elapsedRealtime();
+        try {
+            while(!events.isDone()&&SystemClock.elapsedRealtime()-begin<5500){
+                try(FileOutputStream out=new FileOutputStream(changed)){out.write(123);}
+                SystemClock.sleep(75);
+            }
+            IndexRootScanner.LiveChanges result=events.get(3,TimeUnit.SECONDS);
+            check(result.changed()&&result.paths.contains(changed.getPath())&&!result.overflow,
+                    "watch bridge delivers exact direct event path through packed protocol");
+            android.system.StructStat expected=Os.lstat(fixture.getPath());
+            check(result.device==expected.st_dev&&result.inode==expected.st_ino,
+                    "watch scope sends its actual device and inode");
+            try(android.os.ParcelFileDescriptor directory=NativeDiscovery.pin(-1,fixture.getPath())){
+                long[] metadata=NativeDiscovery.pinnedMetadata(directory.getFd(),"selected child/"+changed.getName());
+                check(metadata[0]==0&&metadata[2]==1,"native anchored metadata can read only owned fixture");
+                File link=new File(fixture,"scope-link");
+                Os.symlink(nested.getPath(),link.getPath());
+                check(NativeDiscovery.pinnedMetadata(directory.getFd(),"scope-link/"+changed.getName())[0]<0,
+                        "component-wise pinned lookup refuses ancestor symlink");
+                Map<String,FileEntry> shown=new HashMap<>();
+                scanner(executable).listPinned((path,folder,size,modified)->shown.put(path,
+                        new FileEntry(path,folder,size,modified)),fixture.getPath(),result);
+                check(shown.containsKey(nested.getPath())&&!shown.containsKey(link.getPath()),
+                        "automatic Files redraw cannot follow aliases");
+            }
+            check(markers.list().length==0,"watch exit removes active markers");
+        }finally{if(!events.isDone()){monitor.cancel();watch.join(4000);}}
+
+        IndexRootScanner cancelled=scanner(executable);
+        java.util.concurrent.FutureTask<IndexRootScanner.LiveChanges> waiting=
+                new java.util.concurrent.FutureTask<>(()->cancelled.watch(fixture.getPath(),java.util.Collections.emptyList()));
+        Thread blocked=new Thread(waiting,"Root-live-cancel-probe");
+        blocked.start();
+        try{
+            SystemClock.sleep(500);long stopping=SystemClock.elapsedRealtime();
+            cancelled.cancel();
+            try{waiting.get(5,TimeUnit.SECONDS);throw new AssertionError("Cancellation did not reach the foreground watcher");}
+            catch(java.util.concurrent.ExecutionException expected){check(expected.getCause() instanceof CancellationException,
+                    "foreground loss cancellation tears down a blocked privileged watch");}
+            check(SystemClock.elapsedRealtime()-stopping<5000,"foreground watch cancellation bounded");
+            check(markers.list().length==0,"cancelled watch removes markers");
+        }finally{if(!waiting.isDone()){cancelled.cancel();blocked.join(4000);}}
+        check(!IndexRootScanner.liveWatchScope("/")&&!IndexRootScanner.liveWatchScope("/proc/self"),
+                "automation cannot opt into whole-root or virtual filesystem watches");
+        report.append("Native event bridge and cancellation checked on owned folder fixture; root launcher=")
+                .append(privileged).append('\n');
     }
 
     private IndexRootScanner scanner(String path) throws IOException { return new IndexRootScanner(markers, path, launcher); }

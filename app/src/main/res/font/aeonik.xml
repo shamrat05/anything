@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<font-family xmlns:android="http://schemas.android.com/apk/res/android">
-    <font android:font="@font/aeonik_regular" android:fontWeight="400" android:fontStyle="normal" />
-    <font android:font="@font/aeonik_medium" android:fontWeight="500" android:fontStyle="normal" />
-    <font android:font="@font/aeonik_regular_italic" android:fontWeight="400" android:fontStyle="italic" />
-</font-family>

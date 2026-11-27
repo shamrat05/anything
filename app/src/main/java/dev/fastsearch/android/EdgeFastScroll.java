@@ -148,6 +148,15 @@ final class EdgeFastScroll {
         IntFunction<String> labels = p -> String.valueOf(p + 1);
         private final EdgeFastScroll edge = rows(this, p -> labels.apply(p));
         List(Context context) { super(context); }
+        private MenuPressGesture releasePick;
+        void enableReleasePick(){releasePick=MenuPressGesture.forList(this,super::onTouchEvent);}
+        @Override public boolean onTouchEvent(MotionEvent e){
+            return releasePick==null?super.onTouchEvent(e):releasePick.touch(e);
+        }
+        @Override public void onWindowFocusChanged(boolean focused){
+            if(!focused&&releasePick!=null)releasePick.clear();
+            super.onWindowFocusChanged(focused);
+        }
         @Override public boolean dispatchTouchEvent(MotionEvent e) {
             return edge.handle(e, super::dispatchTouchEvent) || super.dispatchTouchEvent(e);
         }

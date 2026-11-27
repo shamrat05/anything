@@ -20,13 +20,13 @@ final class FileRename {
         mode.setAdapter(new ArrayAdapter<String>(activity,android.R.layout.simple_spinner_dropdown_item,modes){
             @Override public View getView(int position,View recycled,android.view.ViewGroup parent){TextView view=(TextView)super.getView(position,recycled,parent);style(view);return view;}
             @Override public View getDropDownView(int position,View recycled,android.view.ViewGroup parent){TextView view=(TextView)super.getDropDownView(position,recycled,parent);style(view);return view;}
-            private void style(TextView view){view.setTypeface(activity.getResources().getFont(R.font.aeonik));view.setTextColor(sheet.theme.ink);view.setTextSize(14);}
+            private void style(TextView view){view.setTypeface(activity.getResources().getFont(R.font.inter));view.setTextColor(sheet.theme.ink);view.setTextSize(14);}
         });sheet.content.addView(mode,new LinearLayout.LayoutParams(-1,sheet.dp(48)));
         EditText first=field(sheet,"Name"),second=field(sheet,"Replacement");
         LinearLayout numbers=new LinearLayout(activity);EditText start=field(sheet,"Start"),digits=field(sheet,"Digits");sheet.content.removeView(start);sheet.content.removeView(digits);
         start.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);digits.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);start.setText("1");digits.setText("3");
         numbers.addView(start,new LinearLayout.LayoutParams(0,sheet.dp(48),1));numbers.addView(digits,new LinearLayout.LayoutParams(0,sheet.dp(48),1));sheet.content.addView(numbers);
-        CheckBox extension=new CheckBox(activity);extension.setText("Keep extension");extension.setChecked(true);extension.setTextColor(sheet.theme.ink);extension.setTypeface(activity.getResources().getFont(R.font.aeonik));sheet.content.addView(extension);
+        CheckBox extension=new CheckBox(activity);extension.setText("Keep extension");extension.setChecked(true);extension.setTextColor(sheet.theme.ink);extension.setTypeface(activity.getResources().getFont(R.font.inter));sheet.content.addView(extension);
         TextView preview=sheet.text("",13,sheet.theme.ink);preview.setPadding(0,sheet.dp(12),0,0);sheet.content.addView(preview);
         ProgressBar preparing=new ProgressBar(activity,null,android.R.attr.progressBarStyleHorizontal);preparing.setIndeterminate(true);preparing.setContentDescription("Preparing rename");sheet.content.addView(preparing,new LinearLayout.LayoutParams(-1,sheet.dp(2)));
         sheet.action("Cancel",false,false,null);Button apply=sheet.action("Rename",true,false,null);
@@ -51,6 +51,6 @@ final class FileRename {
         if(entries.size()==1){String name=entries.get(0).name;first.setText(name);int end=entries.get(0).directory?name.length():name.lastIndexOf('.');first.setSelection(0,end>0?end:name.length());}
         update.run();sheet.show();preparation.start(sheet,entries,root,executor,()->{preparing.setVisibility(View.GONE);update.run();if(preparation.error!=null){preview.setText(preparation.error);apply.setEnabled(false);}});return sheet;
     }
-    private static EditText field(AppSheet sheet,String hint){EditText field=new EditText(sheet.getContext());field.setSingleLine(true);field.setTextSize(15);field.setTypeface(sheet.getContext().getResources().getFont(R.font.aeonik));field.setTextColor(sheet.theme.ink);field.setHintTextColor(sheet.theme.muted);field.setHint(hint);field.setContentDescription(hint);sheet.content.addView(field,new LinearLayout.LayoutParams(-1,sheet.dp(48)));return field;}
+    private static EditText field(AppSheet sheet,String hint){EditText field=new EditText(sheet.getContext());field.setSingleLine(true);field.setTextSize(15);field.setTypeface(sheet.getContext().getResources().getFont(R.font.inter));field.setTextColor(sheet.theme.ink);field.setHintTextColor(sheet.theme.muted);field.setHint(hint);field.setContentDescription(hint);sheet.content.addView(field,new LinearLayout.LayoutParams(-1,sheet.dp(48)));return field;}
     private FileRename(){}
 }

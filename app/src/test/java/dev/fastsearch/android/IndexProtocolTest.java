@@ -4,6 +4,8 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CancellationException;
@@ -20,6 +22,9 @@ public final class IndexProtocolTest {
                 + "3 1 2:2 / /apex/item rw - erofs x ro\n"
                 + "4 1 3:3 / /storage/alias rw - fuse x rw\n"
                 + "5 1 4:4 / /mnt/media_rw/disk rw - vfat x rw\n";
+        check(IndexRootScanner.liveWatchScope("/data/local/tmp/owned folder"),"ordinary scoped root directory accepted");
+        for(String scope:new String[]{null,"/","/sys","/proc/1","/storage/emulated/0","/data/../tmp","/data//tmp","/data/tmp/","relative","/data/bad\0name"})
+            check(!IndexRootScanner.liveWatchScope(scope),"reject malformed or reserved live scope");
         List<String> exclusions = IndexRootScanner.exclusions(mounts);
         check(exclusions.contains("/apex/item@2") && !exclusions.contains("/apex/item"), "APEX alias selection");
         check(!exclusions.contains("/mnt/media_rw/disk"), "physical external volume retained");
@@ -40,6 +45,32 @@ public final class IndexProtocolTest {
         try { IndexRootScanner.readField(new ByteArrayInputStream(new byte[]{1}), false); }
         catch (IOException expected) { truncated = true; }
         check(truncated, "truncated records rejected");
+        byte[] literal = "/folder/日本語-é\nname".getBytes(StandardCharsets.UTF_8);
+        byte[] encoded = ByteBuffer.allocate(21 + literal.length).order(ByteOrder.LITTLE_ENDIAN)
+                .put((byte) '-').putLong(5_932_797_660L).putLong(-2_184_345L)
+                .putInt(literal.length).put(literal).array();
+        ByteArrayInputStream fragmented = new ByteArrayInputStream(encoded) {
+            @Override public synchronized int read(byte[] target, int offset, int count) {
+                return super.read(target, offset, Math.min(count, 3));
+            }
+        };
+        IndexRootScanner.PackedReader packed = new IndexRootScanner.PackedReader(fragmented);
+        check(new String(literal, StandardCharsets.UTF_8).equals(packed.next()), "packed framing across pipe reads");
+        check(!packed.directory && packed.size == 5_932_797_660L && packed.modified == -2_184_345L,
+                "exact signed 64-bit metadata");
+        check(packed.next() == null, "packed clean EOF");
+        for (int length : new int[]{1, 20, 21, encoded.length - 1}) {
+            rejectPacked(java.util.Arrays.copyOf(encoded, length), "partial packed record is rejected");
+        }
+        byte[] malformed = encoded.clone();
+        ByteBuffer.wrap(malformed).order(ByteOrder.LITTLE_ENDIAN).putInt(17, 4096);
+        rejectPacked(malformed, "oversized packed path rejected");
+        malformed = encoded.clone();
+        malformed[0] = 'l';
+        rejectPacked(malformed, "unknown packed entry type rejected");
+        malformed = encoded.clone();
+        malformed[22] = 0;
+        rejectPacked(malformed, "embedded NUL rejected");
         File cache = new File(System.getProperty("java.io.tmpdir"), "IndexProtocolCache");
         cache.mkdirs();
         IndexRootScanner cancelled = new IndexRootScanner(cache, "/not-installed/librootindex.so");
@@ -69,4 +100,11 @@ public final class IndexProtocolTest {
         check(cache.list().length == 0, "granted but failed scanner removes markers");
         System.out.println("PASS " + assertions + " protocol assertions: framing, aliases, pre-launch cancellation and failure cleanup.");
     }
+    private static void rejectPacked(byte[] bytes, String reason) throws Exception {
+        boolean rejected = false;
+        try { new IndexRootScanner.PackedReader(new ByteArrayInputStream(bytes)).next(); }
+        catch (IOException expected) { rejected = true; }
+        check(rejected, reason);
+    }
+
 }

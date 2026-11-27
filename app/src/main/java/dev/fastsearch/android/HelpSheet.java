@@ -7,11 +7,16 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
-import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
+import android.graphics.Color;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.RotateDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.text.InputFilter;
 import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.Button;
@@ -22,13 +27,11 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-/** Search help, updates and user-initiated reporting. */
+/** Quick search tips, common questions and user-initiated reporting. */
 final class HelpSheet {
     private static final String EMAIL = "shamrat@callcraftstudio.com";
     private static final String FORM = "https://callcraftstudio.com/contact/";
     private static final String SUBJECT = "Anything bug report";
-    private static final String RELEASES = "https://github.com/shamrat05/anything/releases/latest";
-    private static final String PLAY_STORE = "com.android.vending";
     private final Activity activity;
     private final FileIndex index;
     private final AppSheet sheet;
@@ -44,14 +47,30 @@ final class HelpSheet {
         this.index = index;
         sheet = new AppSheet(activity, "Help", true);
         LinearLayout row = new LinearLayout(activity);
-        String[] titles = {"Search", "Troubleshooting", "Report a bug"};
+        row.setPadding(sheet.dp(4), 0, sheet.dp(4), 0);
+        row.setBackground(AppSheet.shape(sheet.theme.chrome, sheet.dp(14)));
+        String[] titles = {"Search", "FAQ", "Report"};
+        String[] descriptions = {"Search help", "Frequently asked questions", "Report a bug"};
+        int[] icons = {R.drawable.ic_search, R.drawable.ic_document, R.drawable.ic_message};
+        boolean expanded = activity.getResources().getConfiguration().screenWidthDp >= 360
+                && activity.getResources().getConfiguration().fontScale <= 1.15f;
         for (int i = 0; i < titles.length; i++) {
             final int page = i;
             Button tab = new Button(activity);
             tab.setAllCaps(false);
             tab.setText(titles[i]);
-            tab.setMinHeight(sheet.dp(52));
-            tab.setPadding(sheet.dp(3), 0, sheet.dp(3), 0);
+            tab.setContentDescription(descriptions[i]);
+            tab.setTextSize(14);
+            tab.setTypeface(activity.getResources().getFont(R.font.inter_medium));
+            tab.setMinWidth(0);
+            tab.setMinimumWidth(0);
+            tab.setGravity(Gravity.CENTER);
+            tab.setPadding(sheet.dp(4), 0, sheet.dp(4), 0);
+            if (expanded) {
+                Drawable icon = compactIcon(icons[i]);
+                tab.setCompoundDrawablePadding(sheet.dp(5));
+                tab.setCompoundDrawablesRelative(icon, null, null, null);
+            }
             tab.setAccessibilityDelegate(new View.AccessibilityDelegate() {
                 @Override public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
                     super.onInitializeAccessibilityNodeInfo(host, info);
@@ -59,7 +78,9 @@ final class HelpSheet {
                 }
             });
             tab.setOnClickListener(v -> select(page));
-            row.addView(tab, new LinearLayout.LayoutParams(0, -2, 1));
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, sheet.dp(48), 1);
+            size.setMargins(sheet.dp(2), sheet.dp(3), sheet.dp(2), sheet.dp(3));
+            row.addView(tab, size);
             tabs[i] = tab;
         }
         sheet.content.addView(row, new LinearLayout.LayoutParams(-1, -2));
@@ -77,58 +98,71 @@ final class HelpSheet {
 
     private void select(int page) {
         for (int i = 0; i < tabs.length; i++) {
-            tabs[i].setSelected(i == page);
-            tabs[i].setTextColor(i == page ? sheet.theme.accent : sheet.theme.ink);
+            Button tab = tabs[i];
+            boolean active = i == page;
+            int ink = active ? onAccent() : sheet.theme.ink;
+            tab.setSelected(active);
+            tab.setTextColor(ink);
+            tab.setCompoundDrawableTintList(ColorStateList.valueOf(ink));
+            tab.setBackground(actionBackground(active ? sheet.theme.accent : Color.TRANSPARENT));
         }
         body.removeAllViews();
         if (page == 0) {
             paragraph("Search by name", true);
-            paragraph("photo vacation\next:jpg;png\nfile: report\nfolder: music\nsize:>10mb", false);
-            paragraph("Spaces combine terms. Use | for alternatives, ! to exclude, < > to group, and quotes for phrases. * and ? match wildcards.", false);
-            paragraph("Tap a folder to search inside it. Use the file-type and extension filters to narrow the results.", false);
+            paragraph("Type any part of a filename. Open Files to browse a folder or Map to see what takes up space.", false);
+            tip("photo vacation", "Find names containing both words.");
+            tip("ext:jpg;png", "Limit results to JPG or PNG.");
+            tip("folder: music", "Find folders named music.");
+            tip("size:>10mb", "Find files larger than 10 MB.");
+            paragraph("Use quotes for an exact phrase, | for either term, and ! to leave a term out.", false);
         } else if (page == 1) {
-            paragraph("Getting new updates", true);
-            paragraph("Installed version " + BuildConfig.VERSION_NAME + " (build " + BuildConfig.VERSION_CODE + ").", false);
-            boolean fromPlay = PLAY_STORE.equals(installerPackage());
-            paragraph(fromPlay ? "Open Google Play to check for an update."
-                    : "For a GitHub installation, open the latest release and choose the APK you already use. The Android installer will guide you through the update. If you installed from a store, check that store for updates.", false);
-            action("Check for updates", () -> openWeb(fromPlay
-                    ? "https://play.google.com/store/apps/details?id=" + activity.getPackageName() : RELEASES));
-            paragraph("Files missing?", true);
-            paragraph("Check File access under Storage, confirm the active folder and file type, then use Refresh. The first index may take time. You can see its progress under Index statistics.", false);
-            paragraph("Using root storage?", true);
-            paragraph("Root indexing requires a grant from your installed root manager. Open Storage → Index scope to confirm the selected mode, and Refresh to check protected folders. Help does not request root.", false);
-            paragraph("To quiet repeated grant notifications in Magisk, open Superuser → Anything and turn off Notifications. Leave Logs enabled.", false);
-            Runnable funding = FundingSupport.action(activity);
-            if (funding != null) action("Support development", funding);
-            action("Get support", () -> select(2));
+            showFaq();
         } else {
             showReport();
         }
         scroll.scrollTo(0, 0);
     }
 
-    private String installerPackage() {
-        PackageManager packages = activity.getPackageManager();
-        String name = activity.getPackageName();
-        if (Build.VERSION.SDK_INT < 30) return packages.getInstallerPackageName(name);
-        try {
-            return packages.getInstallSourceInfo(name).getInstallingPackageName();
-        } catch (PackageManager.NameNotFoundException unavailable) {
-            return null;
-        }
+    private void tip(String example, String explanation) {
+        TextView code = sheet.text(example, 14, sheet.theme.ink);
+        code.setTypeface(activity.getResources().getFont(R.font.inter_semibold));
+        code.setPadding(0, 0, 0, sheet.dp(2));
+        body.addView(code, new LinearLayout.LayoutParams(-1, -2));
+        paragraph(explanation, false);
     }
 
-    private void openWeb(String url) {
-        try {
-            activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-        } catch (ActivityNotFoundException unavailable) {
-            Toast.makeText(activity, "No app found to open the update page.", Toast.LENGTH_LONG).show();
-        }
+    private void showFaq() {
+        paragraph("Version " + BuildConfig.VERSION_NAME + " (build " + BuildConfig.VERSION_CODE + ")", false);
+        question("Files missing?", "Check the folder and filters first. In the three-dot menu, open Storage → File access, then refresh. A first scan can take a while; Index statistics shows progress.");
+        question("How do I update?",
+                "Open the three-dot menu → Check for updates. "
+                        + "It shows the installed version and the update link for your edition. For a GitHub install, get the same-edition APK and open it in Android’s installer. Don’t uninstall first. Anything doesn’t download or install updates in the background."
+                        + (AppUpdates.installed(activity) == UpdateRoute.Edition.PREVIEW ? " This preview stays on its separate update channel." : ""));
+        question("Does Anything need root?", "No. Shared storage works without root. Protected folders require root access that you explicitly grant in your root manager.");
+        question("A file won’t preview?", "The file may be damaged or its format may not be supported. Use Open with to try another app, or report the issue if the file works elsewhere.");
+    }
+
+    private void question(String label, String answer) {
+        Button disclosure = button(label, R.drawable.ic_chevron_right, false);
+        disclosure.setCompoundDrawablesRelative(null, null, chevron(false), null);
+        disclosure.setCompoundDrawableTintList(ColorStateList.valueOf(sheet.theme.muted));
+        addActionRow(disclosure);
+        TextView text = sheet.text(answer, 14, sheet.theme.muted);
+        text.setPadding(sheet.dp(10), sheet.dp(4), sheet.dp(10), sheet.dp(12));
+        body.addView(text, new LinearLayout.LayoutParams(-1, -2));
+        text.setVisibility(View.GONE);
+        disclosure.setContentDescription(label + " Collapsed");
+        disclosure.setOnClickListener(v -> {
+            boolean expand = text.getVisibility() != View.VISIBLE;
+            text.setVisibility(expand ? View.VISIBLE : View.GONE);
+            disclosure.setSelected(expand);
+            disclosure.setContentDescription(label + (expand ? " Expanded" : " Collapsed"));
+            disclosure.setCompoundDrawablesRelative(null, null, chevron(expand), null);
+        });
     }
 
     private void paragraph(String message, boolean heading) {
-        TextView text = sheet.text(message, heading ? 18 : 15, heading ? sheet.theme.ink : sheet.theme.muted);
+        TextView text = sheet.text(message, heading ? 17 : 14, heading ? sheet.theme.ink : sheet.theme.muted);
         text.setPadding(0, 0, 0, sheet.dp(12));
         if (heading && Build.VERSION.SDK_INT >= 28) text.setAccessibilityHeading(true);
         body.addView(text, new LinearLayout.LayoutParams(-1, -2));
@@ -144,6 +178,8 @@ final class HelpSheet {
                     | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
             description.setFilters(new InputFilter[]{new InputFilter.LengthFilter(SupportLog.DESCRIPTION_LIMIT)});
             description.setMinLines(3);
+            description.setTextSize(14);
+            description.setTypeface(activity.getResources().getFont(R.font.inter));
             description.setTextColor(sheet.theme.ink);
             description.setHintTextColor(sheet.theme.muted);
             include = new CheckBox(activity);
@@ -156,25 +192,72 @@ final class HelpSheet {
         }
         body.addView(description, new LinearLayout.LayoutParams(-1, -2));
         body.addView(include, new LinearLayout.LayoutParams(-1, -2));
-        paragraph("Diagnostics list app and Android versions, index counters, recent Anything events, and app exit reasons when Android makes them available. No system logs, file paths, search terms, contacts or messages. Nothing is sent automatically.", false);
+        paragraph("Optional diagnostics include version numbers, index counts and recent app exit reasons. They don’t include paths, searches, contacts or messages. Nothing is sent automatically.", false);
         body.addView(preview, new LinearLayout.LayoutParams(-1, -2));
         updatePreview();
-        action("Open email draft", this::email);
-        action("Copy report and open web form", this::form);
-        action("Copy report", () -> {
+        action("Open email draft", R.drawable.ic_message, true, this::email);
+        action("Copy and open web form", R.drawable.ic_document, false, this::form);
+        action("Copy report", R.drawable.ic_copy, false, () -> {
             String report = checkedReport();
             if (report != null) copy(report);
         });
     }
 
-    private void action(String label, Runnable action) {
+    private Drawable compactIcon(int id) {
+        Drawable icon = activity.getDrawable(id).mutate();
+        icon.setBounds(0, 0, sheet.dp(17), sheet.dp(17));
+        return icon;
+    }
+
+    private Drawable chevron(boolean expanded) {
+        Drawable arrow = compactIcon(R.drawable.ic_chevron_right);
+        if (!expanded) return arrow;
+        RotateDrawable down = new RotateDrawable();
+        down.setDrawable(arrow);
+        down.setFromDegrees(90f);
+        down.setToDegrees(90f);
+        down.setLevel(10_000);
+        down.setBounds(0, 0, sheet.dp(17), sheet.dp(17));
+        return down;
+    }
+
+    private int onAccent() {
+        return sheet.theme.dark ? sheet.theme.surface : Color.WHITE;
+    }
+
+    private RippleDrawable actionBackground(int fill) {
+        return new RippleDrawable(ColorStateList.valueOf(sheet.theme.line),
+                AppSheet.shape(fill, sheet.dp(10)), AppSheet.shape(Color.WHITE, sheet.dp(10)));
+    }
+
+    private Button button(String label, int icon, boolean primary) {
         Button button = new Button(activity);
         button.setAllCaps(false);
         button.setText(label);
-        button.setTextColor(sheet.theme.ink);
+        button.setTextSize(14);
+        button.setTypeface(activity.getResources().getFont(R.font.inter_medium));
+        button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
         button.setMinHeight(sheet.dp(48));
+        button.setPadding(sheet.dp(10), sheet.dp(4), sheet.dp(10), sheet.dp(4));
+        button.setBackground(actionBackground(primary ? sheet.theme.accent : sheet.theme.chrome));
+        int ink = primary ? onAccent() : sheet.theme.ink;
+        button.setTextColor(ink);
+        button.setCompoundDrawablesRelative(compactIcon(icon), null, null, null);
+        button.setCompoundDrawableTintList(ColorStateList.valueOf(ink));
+        button.setCompoundDrawablePadding(sheet.dp(8));
+        return button;
+    }
+
+    private void addActionRow(Button button) {
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, -2);
+        size.bottomMargin = sheet.dp(6);
+        body.addView(button, size);
+    }
+
+    private void action(String label, int icon, boolean primary, Runnable action) {
+        Button button = button(label, icon, primary);
         button.setOnClickListener(v -> action.run());
-        body.addView(button, new LinearLayout.LayoutParams(-1, -2));
+        addActionRow(button);
     }
 
     private void updatePreview() {
@@ -186,7 +269,7 @@ final class HelpSheet {
         }
         FileIndex.State state = index.getState();
         preview.setText(SupportLog.limitDiagnostics("Anything " + BuildConfig.VERSION_NAME + " (build " + BuildConfig.VERSION_CODE + ", "
-                + (BuildConfig.SMS_ENABLED ? "Full" : "Play") + ")\nAndroid "
+                + (BuildConfig.SMS_ENABLED ? "SMS edition" : "Standard edition") + ")\nAndroid "
                 + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")\nIndex mode: "
                 + (index.isRootEnabled() ? "Root folders" : "Shared storage")
                 + "\nShared-storage access: " + (FileIndex.hasAccess(activity) ? "granted" : "not granted")
@@ -224,7 +307,7 @@ final class HelpSheet {
     String checkedReport() {
         String text = description.getText().toString().trim();
         if (text.length() < 10) {
-            description.setError("Describe the issue in at least 10 characters");
+            description.setError("Add at least 10 characters describing what happened");
             description.requestFocus();
             return null;
         }
@@ -236,8 +319,8 @@ final class HelpSheet {
         if (report == null) return;
         try {
             activity.startActivity(emailIntent(report));
-        } catch (ActivityNotFoundException unavailable) {
-            Toast.makeText(activity, "No email app found. Try the web form instead.", Toast.LENGTH_LONG).show();
+        } catch (ActivityNotFoundException | SecurityException unavailable) {
+            Toast.makeText(activity, "Couldn’t open an email draft. Try the web form or copy the report.", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -252,19 +335,27 @@ final class HelpSheet {
         try {
             activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(FORM)));
             Toast.makeText(activity, "Paste the report into the form message, then review before sending.", Toast.LENGTH_LONG).show();
-        } catch (ActivityNotFoundException unavailable) {
-            Toast.makeText(activity, "No browser found. The report is copied.", Toast.LENGTH_LONG).show();
+        } catch (ActivityNotFoundException | SecurityException unavailable) {
+            Toast.makeText(activity, "Couldn’t open the web form. The report is still copied.", Toast.LENGTH_LONG).show();
         }
     }
 
     private boolean copy(String report) {
         ClipboardManager clipboard = activity.getSystemService(ClipboardManager.class);
-        if (clipboard == null) return false;
+        if (clipboard == null) {
+            Toast.makeText(activity, "Couldn’t copy the report. Try opening an email draft.", Toast.LENGTH_LONG).show();
+            return false;
+        }
         ClipData clip = ClipData.newPlainText(SUBJECT, report);
         android.os.PersistableBundle extras = new android.os.PersistableBundle();
         extras.putBoolean("android.content.extra.IS_SENSITIVE", true);
         clip.getDescription().setExtras(extras);
-        clipboard.setPrimaryClip(clip);
+        try {
+            clipboard.setPrimaryClip(clip);
+        } catch (RuntimeException unavailable) {
+            Toast.makeText(activity, "Couldn’t copy the report. Try opening an email draft.", Toast.LENGTH_LONG).show();
+            return false;
+        }
         Toast.makeText(activity, "Report copied", Toast.LENGTH_SHORT).show();
         return true;
     }

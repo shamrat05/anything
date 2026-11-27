@@ -1,3 +1,4 @@
 679338e0b7fc15c02d275d598654b01a149893bc28a87992e90123c8d06af25b  third_party/commonmark/commonmark-0.24.0.jar
 b54dc332f931e6d07c2766144c087b08f3693677e368151a67020b4e95bb4b99  third_party/commonmark/commonmark-ext-gfm-tables-0.24.0.jar
 729c67ef475f19f112d01e4fc8e55b1f23841912f8e5090db27992801a04f79d  third_party/androidsvg/androidsvg-1.4.jar
+3e158a87bd73d8afb4b6e8239c013b7d049c48563f45860ce99cd2e448cf4a6b  third_party/xz/xz-1.12.jar

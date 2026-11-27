@@ -41,6 +41,8 @@ final class IndexRootScanner {
     }
 
     private static final int MAX_FIELD_BYTES = 1024 * 1024;
+    static final int LIVE_WATCH_LIMIT = 16;
+    private static final int LIVE_EVENT_LIMIT = 32;
     static final String OWNER_DATA = "/data/data";
     static final String OWNER_DATA_ALIAS = "/data/user/0";
     private static final String OWNER_DATA_ALIAS_MARKER = "owner-data-bind-alias";
@@ -93,14 +95,88 @@ final class IndexRootScanner {
         }, directory, "--children");
     }
 
+    static boolean mapAvailable(String directory) {
+        return !belowAny(directory,Arrays.asList("/proc","/sys","/dev","/acct","/config"));
+    }
+
     Result scanMap(Sink sink, String directory, boolean showHidden) throws IOException {
-        if (belowAny(directory, Arrays.asList("/proc", "/sys", "/dev", "/acct", "/config"))) {
+        if (!mapAvailable(directory)) {
+            activeFile.delete();
+            pidFile.delete();
             throw new IOException("Storage maps are unavailable for virtual system folders.");
         }
         return scan(sink, directory, showHidden ? "--map" : "--map-visible");
     }
 
+    void listPinned(Sink sink,String scope,LiveChanges identity)throws IOException {
+        scan(sink,scope,"--children-pinned",Collections.emptyList(),identity,null);
+    }
+    Result scanPinnedMap(Sink sink,String scope,boolean showHidden,LiveChanges identity)throws IOException {
+        return scan(sink,scope,showHidden?"--map-pinned":"--map-visible-pinned",
+                Collections.emptyList(),identity,null);
+    }
+
+    static boolean liveWatchScope(String scope) {
+        if (scope == null || !scope.startsWith("/") || scope.length() < 2 || scope.endsWith("/")
+                || scope.indexOf('\0') >= 0 || scope.getBytes(StandardCharsets.UTF_8).length > 4095
+                || belowAny(scope, BASE_EXCLUDES)) return false;
+        for(String part:scope.substring(1).split("/",-1))
+            if(part.isEmpty()||part.equals(".")||part.equals(".."))return false;
+        return true;
+    }
+
+    static final class LiveChanges {
+        final List<String> paths;
+        final boolean overflow;
+        final long device,inode;
+        LiveChanges(List<String> paths, boolean overflow,long device,long inode) {
+            this.paths = paths;
+            this.overflow = overflow;
+            this.device=device;
+            this.inode=inode;
+        }
+        boolean changed() { return overflow || !paths.isEmpty(); }
+    }
+
+    LiveChanges watch(String scope,List<String> directories)throws IOException{
+        return watch(scope,directories,null);
+    }
+    LiveChanges watch(String scope, List<String> directories,Runnable ready) throws IOException {
+        try {
+            if (!liveWatchScope(scope)) throw new IOException("Not a direct watchable Root folder.");
+            List<String> selected = new ArrayList<>();
+            for (String directory : directories) {
+                if (selected.size() >= LIVE_WATCH_LIMIT - 1) break;
+                if (liveWatchScope(directory) && new File(directory).getParent().equals(scope)) selected.add(directory);
+            }
+            Set<String> watched = new LinkedHashSet<>(selected);
+            watched.add(scope);
+            Set<String> paths = new LinkedHashSet<>();
+            boolean[] overflow = {false};
+            long[] identity={0,0};
+            scan((path, directory, event, modified) -> {
+                if (path.equals(scope)) {
+                    if(event == -1 && modified == 0)overflow[0] = true;
+                    else {identity[0]=event;identity[1]=modified;}
+                    return;
+                }
+                if (liveWatchScope(path) && watched.contains(new File(path).getParent())) paths.add(path);
+            }, scope, "--watch", selected,null,ready);
+            if((!paths.isEmpty()||overflow[0])&&identity[1]==0)
+                throw new IOException("Root watch omitted folder identity.");
+            return new LiveChanges(Collections.unmodifiableList(new ArrayList<>(paths)), overflow[0],identity[0],identity[1]);
+        } finally {
+            // Validation can fail before the scanner takes ownership of the marker.
+            activeFile.delete();
+            pidFile.delete();
+        }
+    }
+
     private Result scan(Sink sink, String traversalRoot, String modeFlag) throws IOException {
+        return scan(sink, traversalRoot, modeFlag, Collections.emptyList(),null,null);
+    }
+
+    private Result scan(Sink sink, String traversalRoot, String modeFlag, List<String> watchPaths,LiveChanges identity,Runnable ready) throws IOException {
         if (!traversalRoot.startsWith("/") || traversalRoot.indexOf('\0') >= 0) {
             throw new IllegalArgumentException("Traversal root must be an absolute path.");
         }
@@ -108,16 +184,22 @@ final class IndexRootScanner {
         try {
             checkCancelled();
             // The app and su may have different mount namespaces, so read root's view.
-            boolean shallow = modeFlag.equals("--children");
+            boolean shallow = modeFlag.startsWith("--children"), watching = modeFlag.equals("--watch");
             boolean map = modeFlag.startsWith("--map");
-            List<String> excluded = shallow ? Collections.emptyList() : exclusions(readMounts());
+            List<String> excluded = shallow || watching ? Collections.emptyList() : exclusions(readMounts());
             checkCancelled();
             StringBuilder command = new StringBuilder(handshake()).append("exec ")
-                    .append(quote(executable)).append(' ').append(quote(traversalRoot));
+                    .append(quote(executable)).append(' ').append(quote(traversalRoot)).append(" --packed");
             if (!modeFlag.isEmpty()) command.append(' ').append(modeFlag);
+            if(identity!=null)command.append(' ').append(Long.toUnsignedString(identity.device))
+                    .append(' ').append(Long.toUnsignedString(identity.inode));
+            for (String path : watchPaths) command.append(' ').append(quote(path));
             String prefix=traversalRoot.endsWith("/")?traversalRoot:traversalRoot+"/";
-            for (String path : excluded)
-                if (!map||path.startsWith(prefix)) command.append(' ').append(quote(path));
+            int appliedExclusions=0;
+            for (String path : excluded) if (!map||path.startsWith(prefix)) {
+                command.append(' ').append(quote(path));
+                appliedExclusions++;
+            }
             Process child = launch(command.toString());
             process = child;
             child.getOutputStream().close();
@@ -128,29 +210,15 @@ final class IndexRootScanner {
             int records = 0;
             try (InputStream input = new BufferedInputStream(child.getInputStream(), 64 * 1024)) {
                 readHandshake(input);
-                FieldReader fields = new FieldReader(input);
+                if(ready!=null)ready.run();
+                PackedReader fields = new PackedReader(input);
                 for (;;) {
                     checkCancelled();
-                    String mode = fields.next(true);
-                    if (mode == null) break;
-                    String sizeText = fields.next(false);
-                    String modifiedText = fields.next(false);
-                    String path = fields.next(false);
-                    if (mode.length() != 10 || path.isEmpty() || path.charAt(0) != '/') {
-                        throw new IOException("Root scanner returned an invalid metadata record.");
-                    }
-                    long size;
-                    long modified;
-                    try {
-                        size = Long.parseLong(sizeText);
-                        modified = Long.parseLong(modifiedText);
-                    } catch (NumberFormatException e) {
-                        throw new IOException("Root scanner returned invalid size or time metadata.", e);
-                    }
-                    boolean directory = mode.charAt(0) == 'd';
-                    // Never expose symlinks, FIFOs, sockets or device nodes as openable files.
-                    if (!directory && mode.charAt(0) != '-') continue;
-                    sink.accept(path, directory, directory && !map ? 0 : size, modified);
+                    String path = fields.next();
+                    if (path == null) break;
+                    if (watching && records > LIVE_EVENT_LIMIT + 1) throw new IOException("Root watch exceeded its event limit.");
+                    boolean directory = fields.directory;
+                    sink.accept(path, directory, directory && !map && !watching ? 0 : fields.size, fields.modified);
                     records++;
                 }
             } catch (IOException failure) {
@@ -160,9 +228,11 @@ final class IndexRootScanner {
             int exit = waitFor(child);
             join(errorThread);
             checkCancelled();
-            if (records == 0) {
+            if (!watching && records == 0) {
                 throw new IOException(rootFailure(errors.text()));
             }
+            if (watching && exit != 0) throw new IOException("Root folder watch unavailable.");
+            if(identity!=null&&exit>=2)throw new IOException("The watched Root folder changed.");
             if (shallow && exit != 0) throw new IOException("Could not read this folder. " + errors.text());
             if (exit > 1 || (exit != 0 && errors.accessErrors == 0 && errors.otherErrors == 0)) {
                 throw new IOException("Root scanner failed (exit " + exit + "). " + errors.text());
@@ -172,7 +242,7 @@ final class IndexRootScanner {
             if (recordRootScan) {
                 SupportLog.record(SupportLog.Event.ROOT_SCAN_FINISHED, true, errors.accessErrors, errors.otherErrors);
             }
-            return new Result(errors.accessErrors, errors.otherErrors, excluded.size(), warning);
+            return new Result(errors.accessErrors, errors.otherErrors, appliedExclusions, warning);
         } catch (IOException failure) {
             checkCancelled();
             if (recordRootScan) {
@@ -333,43 +403,64 @@ final class IndexRootScanner {
         }
     }
 
-    /** Decode contiguous NUL fields directly from each pipe read. */
-    static final class FieldReader {
+    /** Matches the native little-endian packed stream; only the path allocates per record. */
+    static final class PackedReader {
+        private static final int HEADER = 21;
+        private static final int MAX_PATH = 4095; // Native scanner's Linux PATH_MAX minus its terminator.
         private final InputStream input;
         private final byte[] buffer = new byte[64 * 1024];
         private int position;
         private int limit;
+        boolean directory;
+        long size;
+        long modified;
 
-        FieldReader(InputStream input) {
+        PackedReader(InputStream input) {
             this.input = input;
         }
 
-        String next(boolean eofAllowed) throws IOException {
-            ByteArrayOutputStream split = null;
-            for (;;) {
-                if (position == limit) {
-                    int count = input.read(buffer);
-                    if (count < 0) {
-                        if (eofAllowed && split == null) return null;
-                        throw new IOException("Root scan ended before a metadata record was complete.");
-                    }
-                    if (count == 0) continue;
-                    position = 0;
-                    limit = count;
+        private boolean ensure(int needed, boolean eofAllowed) throws IOException {
+            if (limit - position >= needed) return true;
+            limit -= position;
+            if (limit != 0) System.arraycopy(buffer, position, buffer, 0, limit);
+            position = 0;
+            while (limit < needed) {
+                int count = input.read(buffer, limit, buffer.length - limit);
+                if (count < 0) {
+                    if (eofAllowed && limit == 0) return false;
+                    throw new IOException("Root scan ended before a metadata record was complete.");
                 }
-                int start = position;
-                while (position < limit && buffer[position] != 0) position++;
-                int length = position - start;
-                if (length + (split == null ? 0 : split.size()) > MAX_FIELD_BYTES)
-                    throw new IOException("Root metadata field is too large.");
-                boolean complete = position < limit;
-                if (complete) position++;
-                if (complete && split == null)
-                    return new String(buffer, start, length, StandardCharsets.UTF_8);
-                if (split == null) split = new ByteArrayOutputStream(length);
-                split.write(buffer, start, length);
-                if (complete) return new String(split.toByteArray(), StandardCharsets.UTF_8);
+                limit += count;
             }
+            return true;
+        }
+
+        private long littleEndian(int start, int width) {
+            long value = 0;
+            for (int i = width - 1; i >= 0; i--) value = (value << 8) | (buffer[start + i] & 255L);
+            return value;
+        }
+
+        String next() throws IOException {
+            if (!ensure(HEADER, true)) return null;
+            byte type = buffer[position];
+            long length = littleEndian(position + 17, 4);
+            if ((type != 'd' && type != '-') || length < 1 || length > MAX_PATH) {
+                throw new IOException("Root scanner returned an invalid metadata record.");
+            }
+            directory = type == 'd';
+            size = littleEndian(position + 1, 8);
+            modified = littleEndian(position + 9, 8);
+            position += HEADER;
+            ensure((int) length, false);
+            int end = position + (int) length;
+            if (buffer[position] != '/') throw new IOException("Root scanner returned an invalid path.");
+            for (int i = position + 1; i < end; i++) {
+                if (buffer[i] == 0) throw new IOException("Root scanner returned an invalid path.");
+            }
+            String path = new String(buffer, position, (int) length, StandardCharsets.UTF_8);
+            position = end;
+            return path;
         }
     }
 
@@ -502,7 +593,7 @@ final class IndexRootScanner {
         ErrorReader(InputStream input) { this.input = input; }
 
         @Override public void run() {
-            try (InputStream stream = input) {
+            try (InputStream stream = new BufferedInputStream(input)) {
                 ByteArrayOutputStream line = new ByteArrayOutputStream();
                 int value;
                 while ((value = stream.read()) != -1) {

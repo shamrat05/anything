@@ -94,6 +94,7 @@ public final class FileIndex {
 
     private static final int WATCH_LIMIT = 2048;
     private static final int EVENT_LIMIT = 2048;
+    private static final int DISCOVERY_BATCH_LIMIT = 128;
     private static final long RECONCILE_INTERVAL = 30_000;
     private static final Comparator<FileEntry> ORDER = (a, b) -> {
         int order = a.name.compareToIgnoreCase(b.name);
@@ -141,8 +142,11 @@ public final class FileIndex {
     private volatile int pendingOperationUpdates;
     private List<String> foregroundPaths = Collections.emptyList();
     private long[] foregroundStamps = new long[0];
+    private int foregroundScopeVersion = -1;
+    // Immutable shallow candidates; the foreground reader must not touch the observer map.
+    private volatile List<String> foregroundCandidates = Collections.emptyList();
     private final AtomicBoolean discoveryQueued = new AtomicBoolean();
-    private long lastDiscoveryElapsed;
+    private final AtomicBoolean foregroundDiscoveryRetry = new AtomicBoolean();
     private final AtomicBoolean reconcileAfterScan=new AtomicBoolean();
     private final AtomicBoolean cancelRequested = new AtomicBoolean();
     private final AtomicBoolean scopeScanPending = new AtomicBoolean();
@@ -161,7 +165,7 @@ public final class FileIndex {
             0, 0, 0, 0, 0, 0, "Index has not been loaded.", "", 0);
     private long discoveredItems;
     // The following fields belong exclusively to the worker.
-    private Boolean activeRootMode;
+    private volatile Boolean activeRootMode;
     private Database database;
     private FileEntryTable entries = new FileEntryTable();
     private Set<String> readableDirectories = new HashSet<>();
@@ -201,6 +205,45 @@ public final class FileIndex {
     }
 
     public State getState() { return state; }
+    private final FolderSizes folderSizes=new FolderSizes(this);
+    FolderSizes folderSizes(){return folderSizes;}
+    int folderSizeGeneration(){return scopeVersion.get();}
+    boolean safeFolderSizeSnapshot(State candidate,boolean root){
+        return candidate.loaded&&Boolean.valueOf(root).equals(activeRootMode)&&rootEnabled==root;
+    }
+
+    FolderSizes.Result measureFolder(String path,boolean root,android.os.CancellationSignal cancellation,long deadline)throws IOException{
+        cancellation.throwIfCanceled();
+        if(rootEnabled!=root)return FolderSizes.unavailable();
+        if(!root){
+            FolderSizeWalk result=FolderSizeWalk.measure(new File(path).toPath(),FolderSizeWalk.ENTRY_LIMIT,
+                    ()->cancellation.isCanceled()||SystemClock.elapsedRealtime()>=deadline||rootEnabled!=root);
+            return !result.readable?FolderSizes.unavailable():result.partial?FolderSizes.partial(result.bytes):FolderSizes.exact(result.bytes);
+        }
+        // Only the explicit Properties route may start this existing scoped metadata helper.
+        if(!IndexRootScanner.mapAvailable(path))return FolderSizes.unavailable();
+        IndexRootScanner scanner=new IndexRootScanner(context.getCacheDir(),
+                new File(context.getApplicationInfo().nativeLibraryDir,"librootindex.so").getPath());
+        cancellation.setOnCancelListener(scanner::cancel);
+        try{
+            long[] total={0};
+            boolean[] top={false},hadRows={false},overflow={false};
+            String prefix=path.endsWith("/")?path:path+"/";
+            IndexRootScanner.Result scan=scanner.scanMap((name,directory,bytes,modified)->{
+                cancellation.throwIfCanceled();
+                if(name.equals(path)){top[0]=directory;return;}
+                if(!name.startsWith(prefix))return;
+                hadRows[0]=true;
+                if(bytes<0||total[0]>Long.MAX_VALUE-bytes){overflow[0]=true;return;}
+                if(directory&&bytes==Long.MAX_VALUE)overflow[0]=true;
+                total[0]+=bytes;
+            },path,true);
+            boolean partial=scan.accessErrors!=0||scan.otherErrors!=0||scan.excludedPaths!=0||overflow[0];
+            if(!top[0]||!hadRows[0]&&partial)return FolderSizes.unavailable();
+            return partial?FolderSizes.partial(total[0]):FolderSizes.exact(total[0]);
+        }finally{cancellation.setOnCancelListener(null);}
+    }
+
     /** One catch-up per loaded scope/process; returning from a preview never repeats it. */
     public boolean needsCatchUp() { return !closed && (!scannedThisProcess || reconcileNeeded); }
     boolean hasPendingWork() { return discoveryQueued.get() || scanQueued.get() || loadQueued.get() || catchUpQueued.get() || scopeScanPending.get(); }
@@ -208,10 +251,21 @@ public final class FileIndex {
     public boolean isRootEnabled() { return rootEnabled; }
     public List<String> roots() { return rootPaths; }
 
-    List<FileEntry> listFolder(String path, android.os.CancellationSignal cancellation) throws IOException {
+    List<FileEntry> listFolder(String path,android.os.CancellationSignal cancellation)throws IOException{
+        return listFolder(path,cancellation,true,null);
+    }
+    List<FileEntry> listFolder(String path,android.os.CancellationSignal cancellation,boolean allowRoot)throws IOException {
+        return listFolder(path,cancellation,allowRoot,null);
+    }
+    List<FileEntry> listFolder(String path,android.os.CancellationSignal cancellation,
+            IndexRootScanner.LiveChanges identity)throws IOException {
+        return listFolder(path,cancellation,true,identity);
+    }
+    private List<FileEntry> listFolder(String path,android.os.CancellationSignal cancellation,boolean allowRoot,
+            IndexRootScanner.LiveChanges identity)throws IOException {
         ArrayList<FileEntry> entries = new ArrayList<>();
-        if (rootEnabled) {
-            readRootFolder(path, cancellation, entries::add);
+        if (rootEnabled&&allowRoot) {
+            readRootFolder(path, cancellation, entries::add,identity);
         } else {
             File[] children = new File(path).listFiles();
             if (children == null) throw new IOException("Could not read this folder.");
@@ -224,17 +278,22 @@ public final class FileIndex {
         return entries;
     }
 
-    int scanMap(String path, boolean showHidden, android.os.CancellationSignal cancellation,
-                StorageMapData data) throws IOException {
+    int scanMap(String path,boolean showHidden,android.os.CancellationSignal cancellation,StorageMapData data)throws IOException {
+        return scanMap(path,showHidden,cancellation,data,null);
+    }
+    int scanMap(String path,boolean showHidden,android.os.CancellationSignal cancellation,
+                StorageMapData data,IndexRootScanner.LiveChanges identity)throws IOException {
         if(rootEnabled){
             IndexRootScanner scanner=new IndexRootScanner(context.getCacheDir(),
                     new File(context.getApplicationInfo().nativeLibraryDir,"librootindex.so").getPath());
             cancellation.setOnCancelListener(scanner::cancel);
             try{
-                IndexRootScanner.Result result=scanner.scanMap((name,directory,bytes,modified)->{
+                IndexRootScanner.Sink rows=(name,directory,bytes,modified)->{
                     cancellation.throwIfCanceled();
                     if(!path.equals(name))data.addTile(new FileEntry(name,directory,directory?0:bytes,modified),bytes);
-                },path,showHidden);
+                };
+                IndexRootScanner.Result result=identity==null?scanner.scanMap(rows,path,showHidden)
+                        :scanner.scanPinnedMap(rows,path,showHidden,identity);
                 return result.accessErrors+result.otherErrors;
             }finally{cancellation.setOnCancelListener(null);}
         }
@@ -261,7 +320,7 @@ public final class FileIndex {
     }
 
     private void readRootFolder(String path,android.os.CancellationSignal cancellation,
-                               java.util.function.Consumer<FileEntry> sink)throws IOException{
+                               java.util.function.Consumer<FileEntry> sink,IndexRootScanner.LiveChanges identity)throws IOException{
         IndexRootScanner scanner=new IndexRootScanner(context.getCacheDir(),
                 new File(context.getApplicationInfo().nativeLibraryDir,"librootindex.so").getPath());
         cancellation.setOnCancelListener(scanner::cancel);
@@ -270,7 +329,8 @@ public final class FileIndex {
                 cancellation.throwIfCanceled();
                 if(!path.equals(name))sink.accept(new FileEntry(name,directory,size,modified));
             };
-            scanner.listChildren(records,path);
+            if(identity==null)scanner.listChildren(records,path);
+            else scanner.listPinned(records,path,identity);
         }finally{cancellation.setOnCancelListener(null);}
     }
 
@@ -319,6 +379,7 @@ public final class FileIndex {
         if (restartScan) scopeScanPending.set(true);
         rootEnabled = enabled;
         scopeVersion.incrementAndGet();
+        folderSizes.modeChanged();
         context.getSharedPreferences(preferenceName, Context.MODE_PRIVATE).edit()
                 .putBoolean("root_enabled", enabled).apply();
         requestCancellation();
@@ -433,18 +494,23 @@ public final class FileIndex {
     synchronized void probeForegroundChanges(String folder) {
         if(closed||scanQueued.get()||!state.loaded||state.lastScanMillis==0||!sharedAccess())return;
         List<String> paths=new ArrayList<>();
-        for(String path:commonSharedFolders(folder)) paths.add(ioPath(path));
+        int version=scopeVersion.get();
+        List<String> chosen=discoveryFolders(folder);
+        for(String path:chosen)paths.add(ioPath(path));
         long[] stamps=NativeDiscovery.modified(paths);
-        if(paths.equals(foregroundPaths)&&java.util.Arrays.equals(stamps,foregroundStamps))return;
+        boolean retry=foregroundDiscoveryRetry.getAndSet(false);
+        if(!retry&&version==foregroundScopeVersion&&paths.equals(foregroundPaths)
+                &&Arrays.equals(stamps,foregroundStamps))return;
         if(scheduleDiscovery(folder)){
+            foregroundScopeVersion=version;
             foregroundPaths=paths;
             foregroundStamps=stamps;
-        }
+        }else if(retry)foregroundDiscoveryRetry.set(true);
     }
 
     private LinkedHashSet<String> commonSharedFolders(String folder){
         LinkedHashSet<String> chosen=new LinkedHashSet<>();
-        if(folder!=null&&watchable(folder))chosen.add(folder);
+        if(folder!=null)chosen.add(indexPath(folder));
         List<String> bases=boundedProbeRoot!=null?Collections.singletonList(boundedProbeRoot):sharedRoots(context);
         for(String base:bases){
             String path=indexPath(base);chosen.add(path);
@@ -454,23 +520,56 @@ public final class FileIndex {
         return chosen;
     }
 
+    private List<String> discoveryFolders(String folder) {
+        LinkedHashSet<String> chosen=commonSharedFolders(folder);
+        for(String path:foregroundCandidates){
+            if(chosen.size()>=DISCOVERY_BATCH_LIMIT)break;
+            chosen.add(path);
+        }
+        List<String> result=new ArrayList<>();
+        for(String path:chosen){
+            if(result.size()>=DISCOVERY_BATCH_LIMIT)break;
+            if(underRoots(path)&&watchable(path))result.add(path);
+        }
+        return result;
+    }
+
+    boolean supportsForegroundCheck(String folder) {
+        if(folder==null||!sharedAccess())return false;
+        String path=indexPath(folder);
+        return underRoots(path)&&watchable(path);
+    }
+
+    boolean supportsLiveRootFolder(String folder) {
+        return !closed && rootEnabled && Boolean.TRUE.equals(activeRootMode)
+                && state.loaded && state.lastScanMillis > 0 && !state.scanning
+                && IndexRootScanner.liveWatchScope(folder) && underRoots(folder)
+                && !supportsForegroundCheck(folder);
+    }
+
+    IndexRootScanner.LiveChanges watchRootFolder(String folder,List<String> directories,
+            android.os.CancellationSignal cancellation,Runnable ready)throws IOException {
+        cancellation.throwIfCanceled();
+        if(!supportsLiveRootFolder(folder))throw new IOException("Root folder watch unavailable.");
+        IndexRootScanner scanner=new IndexRootScanner(context.getCacheDir(),
+                new File(context.getApplicationInfo().nativeLibraryDir,"librootindex.so").getPath());
+        cancellation.setOnCancelListener(scanner::cancel);
+        try{return scanner.watch(folder,directories,ready);}
+        finally{cancellation.setOnCancelListener(null);}
+    }
+
     private boolean scheduleDiscovery(String folder) {
         if(closed||!discoveryQueued.compareAndSet(false,true))return false;
+        int version=scopeVersion.get();
         synchronized(catchUpLock){
         pendingPathUpdates++;
-        try{worker.execute(()->{try{
+        try{worker.execute(()->{boolean complete=false;try{
             if(scanQueued.get())return;
-            checkDiscovery(scopeVersion.get());
+            checkDiscovery(version);
             ensureLoaded();
             if(lastScanMillis==0||!sharedAccess())return;
-            long now=SystemClock.elapsedRealtime();if(now-lastDiscoveryElapsed<500)return;
-            lastDiscoveryElapsed=now;int version=scopeVersion.get();
-            LinkedHashSet<String> chosen=commonSharedFolders(folder);
-            // Prioritize shallow covered folders, including app-specific media folders.
-            List<String> candidates=new ArrayList<>(observers.keySet());candidates.sort(Comparator.comparingInt(String::length).thenComparing(Comparator.naturalOrder()));
-            for(String path:candidates){if(chosen.size()>=128)break;chosen.add(path);}
-            List<String> logical=new ArrayList<>(),physical=new ArrayList<>();
-            for(String path:chosen){if(logical.size()>=128)break;if(underRoots(path)&&watchable(path)){logical.add(path);physical.add(ioPath(path));}}
+            List<String> logical=discoveryFolders(folder),physical=new ArrayList<>(logical.size());
+            for(String path:logical)physical.add(ioPath(path));
             long[] stamps=NativeDiscovery.modified(physical);ScanData additions=new ScanData();
             Map<String,Set<String>> listings=new HashMap<>();List<String> removed=new ArrayList<>();
             for(int i=0;i<logical.size();i++){
@@ -481,7 +580,9 @@ public final class FileIndex {
                 File[] children=directory.listFiles();if(children==null)continue;
                 Set<String> seen=new HashSet<>();listings.put(path,seen);
                 // Only new subtrees are walked. Existing descendants are never recursively revisited.
-                for(File child:children){checkDiscovery(version);seen.add(indexPath(child.getAbsolutePath()));FileEntry fresh=indexedMetadata(child);if(fresh==null)continue;
+                for(File child:children){checkDiscovery(version);FileEntry fresh=indexedMetadata(child);
+                    if(fresh==null){if(isDenied(child))seen.add(indexPath(child.getAbsolutePath()));continue;}
+                    seen.add(fresh.path());
                     FileEntry previous=entries.get(fresh.path());
                     if(previous!=null&&previous.directory!=fresh.directory)removed.add(fresh.path());
                     if(fresh.directory&&(previous==null||!previous.directory))walk(child, additions, false, () -> checkDiscovery(version));
@@ -494,10 +595,14 @@ public final class FileIndex {
                 if(seen!=null&&!seen.contains(entry.path()))removed.add(entry.path());}
             checkDiscovery(version);
             if(!additions.entries.isEmpty()||!removed.isEmpty()){
+                int directoryCount=readableDirectories.size();
                 persistDelta(removed,additions,version);for(String path:removed)removeTree(path);entries.putAll(additions.entries);
-                readableDirectories.addAll(additions.readable);snapshot=mergeSnapshot(snapshot,removed,additions.entries);
-                syncObservers();publishStable("");
+                boolean newDirectory=readableDirectories.addAll(additions.readable);
+                snapshot=mergeSnapshot(snapshot,removed,additions.entries);
+                if(newDirectory||directoryCount!=readableDirectories.size())syncObservers();
+                publishStable("");
             }
+            complete=true;
         } catch (CancellationException stopped) {
             synchronized (catchUpLock) {
                 if (!closed && pendingOperationUpdates > 0) {
@@ -508,7 +613,11 @@ public final class FileIndex {
             }
         } catch (RuntimeException | OutOfMemoryError failed) {
             reconcileNeeded = true;
-        } finally { discoveryQueued.set(false); finishPathUpdate(true); }});
+        } finally {
+            if(!complete)foregroundDiscoveryRetry.set(true);
+            discoveryQueued.set(false);
+            finishPathUpdate(true);
+        }});
         interruptCatchUpForPathUpdate();
         }catch(RejectedExecutionException stopped){discoveryQueued.set(false);pendingPathUpdates--;return false;}
         }
@@ -539,22 +648,32 @@ public final class FileIndex {
 
     /** Only paths affected by an acknowledged or interrupted file operation, never a whole-cache check. */
     CompletableFuture<org.json.JSONObject> reconcilePaths(List<String> paths){
+        return reconcilePaths(paths,null,0,0);
+    }
+    CompletableFuture<org.json.JSONObject> reconcileLiveRootPaths(String folder,IndexRootScanner.LiveChanges changes){
+        return reconcilePaths(changes.paths,folder,changes.device,changes.inode);
+    }
+    private CompletableFuture<org.json.JSONObject> reconcilePaths(List<String> paths,String liveRootScope,long liveDevice,long liveInode){
+        int requestedVersion=scopeVersion.get();
         CompletableFuture<org.json.JSONObject> done=new CompletableFuture<>();List<String> requested=new ArrayList<>(paths);
         if(closed){done.completeExceptionally(new IOException("Index is closed."));return done;}
         synchronized(catchUpLock){
         pendingPathUpdates++;
         pendingOperationUpdates++;
-        try{worker.execute(()->{try{ensureLoaded();List<String> chosen=new ArrayList<>();
+        try{worker.execute(()->{try{
+            if(liveRootScope!=null&&(requestedVersion!=scopeVersion.get()||!supportsLiveRootFolder(liveRootScope)))
+                throw new CancellationException("Root folder changed.");
+            ensureLoaded();List<String> chosen=new ArrayList<>();
             if(requested.size()>FileClipboard.MAX_ITEMS*2)throw new IOException("Too many changed paths.");
             for (String path : requested) {
                 FileOperationWorker.requirePath(path);
                 String indexed = indexPath(path);
-                if (underRoots(indexed)) chosen.add(indexed);
+                if (underRoots(indexed)&&(liveRootScope==null||indexed.startsWith(liveRootScope+"/")&&IndexRootScanner.liveWatchScope(indexed))) chosen.add(indexed);
             }
             Collections.sort(chosen);List<String> compact=new ArrayList<>();String previous=null;
             for(String path:chosen)if(previous==null||(!path.equals(previous)&&!path.startsWith(previous+"/"))){compact.add(path);previous=path;}
             if(compact.isEmpty()){done.complete(new org.json.JSONObject().put("checkedRows",0).put("snapshotRows",0));return;}
-            cancelRequested.set(false);org.json.JSONObject result=reconcileCache(true,compact,false);
+            cancelRequested.set(false);org.json.JSONObject result=reconcileCache(true,compact,false,false,liveRootScope,liveDevice,liveInode);
             if(result==null)throw new IOException(state.error.isEmpty()?"Changed-file update stopped.":state.error);
             done.complete(result);
         }catch(Exception|OutOfMemoryError failure){done.completeExceptionally(failure);}
@@ -601,6 +720,9 @@ public final class FileIndex {
         return reconcileCache(force,targets,visible,false);
     }
     private org.json.JSONObject reconcileCache(boolean force,List<String> targets,boolean visible,boolean requested){
+        return reconcileCache(force,targets,visible,requested,null,0,0);
+    }
+    private org.json.JSONObject reconcileCache(boolean force,List<String> targets,boolean visible,boolean requested,String liveRootScope,long liveDevice,long liveInode){
         int version=scopeVersion.get();long started=SystemClock.elapsedRealtime();
         if(!requested&&!force&&scannedThisProcess&&!reconcileNeeded){return null;}
         if(!requested&&!force&&lastReconcileElapsed>0&&started-lastReconcileElapsed<RECONCILE_INTERVAL){return null;}
@@ -634,6 +756,8 @@ public final class FileIndex {
                 .put("snapshot",snapshotFile==null?"":snapshotFile.getPath()).put("roots",new org.json.JSONArray(rootPaths)).put("denied",new org.json.JSONArray(denied))
                 .put("verifyFiles",force).put("foldersOnly",foldersOnly);
             if(targets!=null)request.put("targets",new org.json.JSONArray(targets)).put("parents",new org.json.JSONArray(parents));
+            if(liveRootScope!=null)request.put("liveRootScope",liveRootScope)
+                    .put("liveRootDevice",liveDevice).put("liveRootInode",liveInode);
             FileOperationProcess.Progress callback=new FileOperationProcess.Progress(){
                 @Override public void onProgress(int completed,int total,org.json.JSONArray ignored){checkCancelled(version);discoveredItems=completed;
                     if(visible)publish(true,completed,0,total,"Updating "+String.format(java.util.Locale.getDefault(),"%,d / %,d",completed,total),"");}
@@ -848,7 +972,7 @@ public final class FileIndex {
             }
             checkCancelled(version);
             long walkFinished=SystemClock.elapsedRealtime();
-            List<FileEntry> completed = sorted(found.entries);
+            List<FileEntry> completed = sortedCache(found.entries);
             long completedAt = System.currentTimeMillis();
             long duration = SystemClock.elapsedRealtime() - started;
             persistAll(found, completed, completedAt, duration, version);
@@ -981,15 +1105,35 @@ public final class FileIndex {
         try {
             db.delete("entries", null, null);
             db.delete("directories", null, null);
-            try (SQLiteStatement insert = db.compileStatement("INSERT INTO entries(path,directory,size,modified) VALUES(?,?,?,?)");
-                 SQLiteStatement dirs = db.compileStatement("INSERT OR REPLACE INTO directories(path,readable) VALUES(?,?)")) {
-                int checked = 0;
-                for (FileEntry entry : databaseOrder) {
-                    if ((checked++ & 255) == 0) checkCancelled(version);
-                    insertEntry(insert, entry);
+            // Stay well under Android 8's 999-variable limit and reuse one compiled statement.
+            final int batch = 64;
+            int end = databaseOrder.size();
+            String prefix = "INSERT INTO entries(path,directory,size,modified) VALUES";
+            if (end >= batch) {
+                try (SQLiteStatement insert = db.compileStatement(insertRows(prefix, batch))) {
+                    for (int offset = 0; offset <= end - batch; offset += batch) {
+                        checkCancelled(version);
+                        bindEntries(insert, databaseOrder, offset, batch);
+                    }
                 }
-                for (String path : found.readable) insertDirectory(dirs, path, true);
-                for (String path : found.denied) insertDirectory(dirs, path, false);
+            }
+            int tail = end % batch;
+            if (tail != 0) {
+                checkCancelled(version);
+                try (SQLiteStatement insert = db.compileStatement(insertRows(prefix, tail))) {
+                    bindEntries(insert, databaseOrder, end - tail, tail);
+                }
+            }
+            try (SQLiteStatement dirs = db.compileStatement("INSERT OR REPLACE INTO directories(path,readable) VALUES(?,?)")) {
+                int checked = 0;
+                for (String path : found.readable) {
+                    if ((checked++ & 255) == 0) checkCancelled(version);
+                    insertDirectory(dirs, path, true);
+                }
+                for (String path : found.denied) {
+                    if ((checked++ & 255) == 0) checkCancelled(version);
+                    insertDirectory(dirs, path, false);
+                }
             }
             writeLong(db, "last_scan", completed);
             writeLong(db, "duration", duration);
@@ -1000,6 +1144,20 @@ public final class FileIndex {
             checkCancelled(version);
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
+    }
+
+    private static String insertRows(String prefix, int rows) {
+        StringBuilder sql = new StringBuilder(prefix);
+        for (int i = 0; i < rows; i++) {
+            if (i != 0) sql.append(',');
+            sql.append("(?,?,?,?)");
+        }
+        return sql.toString();
+    }
+
+    private static void bindEntries(SQLiteStatement statement, List<FileEntry> entries, int offset, int count) {
+        for (int i = 0; i < count; i++) bindEntry(statement, 4 * i + 1, entries.get(offset + i));
+        statement.execute();
     }
 
     private void syncObservers() {
@@ -1013,6 +1171,8 @@ public final class FileIndex {
             int order = Integer.compare(a.length(), b.length());
             return order == 0 ? a.compareTo(b) : order;
         });
+        foregroundCandidates = Collections.unmodifiableList(new ArrayList<>(
+                paths.subList(0, Math.min(paths.size(), DISCOVERY_BATCH_LIMIT))));
         Set<String> desired = new HashSet<>(paths.subList(0, Math.min(paths.size(), WATCH_LIMIT)));
         Iterator<Map.Entry<String, DirectoryObserver>> iterator = observers.entrySet().iterator();
         while (iterator.hasNext()) {
@@ -1032,6 +1192,7 @@ public final class FileIndex {
     }
 
     private void stopObservers() {
+        foregroundCandidates = Collections.emptyList();
         for (DirectoryObserver observer : observers.values()) observer.stop();
         observers.clear();
     }
@@ -1186,7 +1347,7 @@ public final class FileIndex {
         if (lastScanMillis == 0) return rootEnabled ? "Root index is empty. Refresh to index /data, /system and other folders."
                 : "Shared-storage index is empty. Refresh to index accessible folders.";
         if (Boolean.TRUE.equals(activeRootMode)) {
-            return snapshot.size() + " items. Shared-storage watch requests: "+observers.size()+". Private root updates require refresh. "
+            return snapshot.size() + " items. Shared-storage watch requests: "+observers.size()+". Open Root folders can update while visible; refresh for changes elsewhere. "
                     + rootAccessErrors + " access errors. Virtual folders, symlinks and "
                     + rootExcludedPaths + " excluded paths/aliases skipped."
                     + (scanWarning.isEmpty() ? "" : " " + scanWarning);
@@ -1278,11 +1439,15 @@ public final class FileIndex {
 
     private static void insertEntry(SQLiteStatement insert, FileEntry entry) {
         insert.clearBindings();
-        insert.bindString(1, entry.path());
-        insert.bindLong(2, entry.directory ? 1 : 0);
-        insert.bindLong(3, entry.size);
-        insert.bindLong(4, entry.modified);
+        bindEntry(insert, 1, entry);
         insert.executeInsert();
+    }
+
+    private static void bindEntry(SQLiteStatement insert, int start, FileEntry entry) {
+        insert.bindString(start, entry.path());
+        insert.bindLong(start + 1, entry.directory ? 1 : 0);
+        insert.bindLong(start + 2, entry.size);
+        insert.bindLong(start + 3, entry.modified);
     }
 
     private static void insertDirectory(SQLiteStatement insert, String path, boolean readable) {

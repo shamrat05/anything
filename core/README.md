@@ -108,3 +108,23 @@ java -cp core/build/test-classes:third_party/re2j/re2j-1.8.jar dev.fastsearch.co
 ```
 
 On JDK 8, replace `--release 8` with `-source 8 -target 8`.
+
+## Cleaner review rules
+
+`CleanerRules` classifies immutable `FileEntry` metadata without filesystem access.
+Construct a `Filter` from verified, ordinary app-accessible Android storage
+mounts, a minimum age in milliseconds, a minimum byte size and optional folder
+and extension conditions. The optional final constructor parameter excludes
+whole folders. Folder comparisons are full path segments; extension groups are
+comma- or semicolon-separated, and `tar.gz` matches as one compound suffix.
+`Filter.accepts` applies the same scope and review conditions even to files
+without a rule label, for example when preparing a separate duplicate check.
+
+Classifications describe filename or location clues, including temporary files,
+shared thumbnail caches, rejected patches, diagnostics, backups, archives and
+shared WhatsApp or Telegram media. No result marks anything safe to remove, and
+personal media outside recognized folders is not independently suggested.
+Private/root paths, non-media Android subtrees, system providers, trash and
+protected metadata paths are out of scope. Do not use this lexical filter in
+place of an ordinary verified volume traversal, a symlink policy or user consent
+for any action. It never opens, changes or deletes files.
