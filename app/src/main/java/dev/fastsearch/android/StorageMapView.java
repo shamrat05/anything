@@ -30,6 +30,9 @@ import java.util.function.Predicate;
 final class StorageMapView extends ListView {
     private static final int MIN_TILE_WIDTH_DP = 60;
     private static final int TILE_MARK_STRIP_DP = 16;
+    private static final int NESTED_INSET_DP = 5;
+    private static final int NESTED_TARGET_DP = 48;
+    private static final int NESTED_GEOMETRY_SLACK_DP = 4;
     private static final int MAX_ROW_TILES = 8;
     private static final double LABEL_FLOOR_BYTES = 30 * (1L << 20);
     private static final double LARGE_ITEM_WEIGHT = 12;
@@ -45,7 +48,7 @@ final class StorageMapView extends ListView {
     private AppOwnerBadges appOwnerBadges;
     private final Function<Long, String> formatSize;
     private final ScaleGestureDetector pinch;
-    private final int minTileWidth, minBandHeight, normalStroke, selectedStroke;
+    private final int minTileWidth, minBandHeight, normalStroke, selectedStroke, tileCaptionHeight;
     private final Typeface tileTypeface;
     private List<StorageMapData.Tile> tiles = java.util.Collections.emptyList();
     private Predicate<FileEntry> selected = entry -> false;
@@ -93,6 +96,10 @@ final class StorageMapView extends ListView {
         normalStroke = Math.max(1, dp(1));
         selectedStroke = dp(2);
         tileTypeface = getResources().getFont(R.font.inter_medium);
+        Paint captionPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        captionPaint.setTypeface(tileTypeface);
+        captionPaint.setTextSize(labelSize);
+        tileCaptionHeight = Math.max(dp(40), captionPaint.getFontMetricsInt(null) * 2 + dp(9));
         setDivider(null);
         setSelector(android.R.color.transparent);
         setPadding(dp(4), dp(4), dp(4), dp(44));
@@ -358,7 +365,12 @@ final class StorageMapView extends ListView {
         int maxHeight = Math.max(minBandHeight, Math.round(viewportHeight * .46f));
         double scale = Math.min(minBandHeight * .5, maxHeight / MAX_ITEM_WEIGHT) * zoom;
         int minHeight = Math.round(minBandHeight * zoom);
-        int folderMinHeight = Math.round(Math.min(maxHeight, Math.max(minBandHeight, dp(105))) * zoom);
+        // Sampled folders must reserve a real 48dp child hit target after both caption
+        // lines, the icon/badge strip and the bottom inset. A short viewport can scroll
+        // the band instead of silently changing a child tap into a folder tap.
+        int folderFloor=Math.max(minBandHeight, tileCaptionHeight+dp(TILE_MARK_STRIP_DP)
+                +dp(NESTED_INSET_DP)+dp(NESTED_TARGET_DP)+dp(NESTED_GEOMETRY_SLACK_DP));
+        int folderMinHeight=Math.round(folderFloor*zoom);
         for (int start = 0; start < count;) {
             double weight = 0, smallest = Double.POSITIVE_INFINITY, largest = 0;
             double bestScore = Double.POSITIVE_INFINITY;
@@ -371,7 +383,8 @@ final class StorageMapView extends ListView {
                 hasSample |= !tiles.get(end).children.isEmpty();
                 int height = Math.max(hasSample ? folderMinHeight : minHeight, (int) Math.round(weight * scale));
                 double narrowest = mapWidth * smallest / weight;
-                if (end > start && (narrowest < minTileWidth || height > maxHeight * zoom)) break;
+                int heightLimit=hasSample?Math.max(maxHeight,folderFloor):maxHeight;
+                if (end > start && (narrowest < minTileWidth || height > heightLimit * zoom)) break;
                 double widest = mapWidth * largest / weight;
                 double score = Math.max(widest / (height * TARGET_ASPECT), height * TARGET_ASPECT / narrowest);
                 if (end == count - 2) score += .25; // Prefer to avoid a lone tile on the last row.
@@ -527,9 +540,9 @@ final class StorageMapView extends ListView {
                 showTileMarks = width >= dp(72) && height >= captionHeight() + dp(TILE_MARK_STRIP_DP);
                 if (showTileMarks && fileMark == null)
                     fileMark = getContext().getDrawable(UiTheme.fileIcon(getContext(),tile.entry)).mutate();
-                int leftInset = dp(5), topInset = folderHeaderHeight();
+                int leftInset = dp(NESTED_INSET_DP), topInset = folderHeaderHeight();
                 if (width >= dp(58) && height >= topInset + dp(24)) {
-                    StorageMapData.regions(tile, width - 2 * leftInset, height - topInset - dp(5),
+                    StorageMapData.regions(tile, width - 2 * leftInset, height - topInset - dp(NESTED_INSET_DP),
                             (file, l, t, r, b) -> {
                                 if(r-l>=2 && b-t>=2) regions.add(new Nested(file,leftInset+l,topInset+t,leftInset+r,topInset+b));
                             });
@@ -549,7 +562,7 @@ final class StorageMapView extends ListView {
             updateSelection();
         }
 
-        private int captionHeight() { return Math.max(dp(40), getLineHeight() * 2 + dp(9)); }
+        private int captionHeight() { return tileCaptionHeight; }
         private int folderHeaderHeight() { return captionHeight() + (showTileMarks ? dp(TILE_MARK_STRIP_DP) : 0); }
 
         @Override public boolean performClick() {
@@ -568,8 +581,8 @@ final class StorageMapView extends ListView {
                 case MotionEvent.ACTION_UP:
                     pendingChild=null;
                     for (Nested region : regions) {
-                        if (region.file != null && region.bounds.width() >= dp(48)
-                                && region.bounds.height() >= dp(48) && region.bounds.contains(downX,downY)
+                        if (region.file != null && region.bounds.width() >= dp(NESTED_TARGET_DP)
+                                && region.bounds.height() >= dp(NESTED_TARGET_DP) && region.bounds.contains(downX,downY)
                                 && region.bounds.contains(event.getX(),event.getY())) {
                             pendingChild=region.file;break;
                         }

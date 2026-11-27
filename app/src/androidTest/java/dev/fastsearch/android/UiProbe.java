@@ -1956,8 +1956,13 @@ public final class UiProbe extends Instrumentation {
                 if(entry==null||!entry.name.equals("Lab capture.txt"))continue;
                 if((Integer)field(region,"color")!=map.fillColor(4))throw new AssertionError("largest child did not render in red");
                 android.graphics.RectF b=(android.graphics.RectF)field(region,"bounds");
-                if(b.width()<48*map.getResources().getDisplayMetrics().density
-                        ||b.height()<48*map.getResources().getDisplayMetrics().density)return null;
+                int target=Math.round(48*map.getResources().getDisplayMetrics().density);
+                if(b.width()<target||b.height()<target||field(region,"name")==null)
+                    throw new AssertionError("largest child needs a labeled "+target+"px hit region; was "
+                            +b.width()+" x "+b.height()+"px in "+tile.getWidth()+" x "+tile.getHeight()+"px folder tile");
+                android.graphics.Rect visible=new android.graphics.Rect();
+                if(!tile.getLocalVisibleRect(visible)||!visible.contains((int)b.centerX(),(int)b.centerY()))
+                    throw new AssertionError("largest child hit is clipped by the map viewport");
                 return new int[][]{
                         {(int)(band.getLeft()+tile.getLeft()+b.centerX()),
                          (int)(band.getTop()+tile.getTop()+b.centerY())},
