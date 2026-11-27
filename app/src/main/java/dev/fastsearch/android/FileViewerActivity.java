@@ -587,6 +587,8 @@ public final class FileViewerActivity extends Activity {
         }else if(image!=null){
             format.add(new SpotlightTour.Step("Fit the image","The middle button resets zoom. Use − or +, pinch or double-tap to zoom, then drag to pan.",()->formatGuideTarget));
             if(kind==Kind.SVG)format.add(new SpotlightTour.Step("Read the SVG source","Tap Source below the image to inspect its text. Tap Image to return.",()->viewerGuideControl(previewContent,"Source")));
+        }else if(shown!=null&&shown.table!=null){
+            format.add(new SpotlightTour.Step("Read the table","Scroll across the columns or down the rows. Use Source text for the original text preview.",()->formatGuideTarget));
         }else if(kind==Kind.OFFICE&&textScroll!=null){
             format.add(new SpotlightTour.Step("Read an Office summary","Read the document text, workbook values or slide text here. Use Open in another app for full formatting and editing.",()->formatGuideTarget));
         }else if(textScroll!=null){
@@ -791,6 +793,7 @@ public final class FileViewerActivity extends Activity {
             return true;
         }
         private boolean canSwipe(MotionEvent event){return event.getPointerCount()==1&&session!=null&&session.entries.size()>1
+                &&(shown==null||shown.table==null||readerSource)
                 &&(image==null||image.state()[0]<=1.05f)&&Math.abs(event.getX()-downX)>slop*1.5f
                 &&Math.abs(event.getX()-downX)>Math.abs(event.getY()-downY)*1.35f;}
         private void follow(float distance){
@@ -916,6 +919,7 @@ public final class FileViewerActivity extends Activity {
         if (result.size >= 0) size = result.size;
         details.setText(metadata());View cover=loadingPlaceholder;loadingPlaceholder=null;previewContent.removeAllViews();
         if (kind == Kind.IMAGE || kind == Kind.PDF || kind==Kind.SVG&&!readerSource) showImage(result);
+        else if (kind==Kind.TEXT&&result.table!=null)showDelimitedTable(result);
         else if (kind == Kind.TEXT || kind==Kind.MARKDOWN || kind==Kind.HTML || kind==Kind.SVG) showDocument(result);
         else if (kind == Kind.OFFICE) {if(result.slide!=null)showSlides(result.slide);else showOffice(result.office);}
         else if (kind == Kind.ZIP) showArchive(result.archive);
@@ -924,6 +928,7 @@ public final class FileViewerActivity extends Activity {
         else if (kind == Kind.APK) showApk(result.apk);
         else if (kind == Kind.DEX) showDexEntry();
         else showMedia(result);
+        if(result.tableMalformed)note("The table has incomplete or invalid quoting. Showing source text.");
         if(cleanerReview)hideReviewTransfers(previewContent);
         if(cover!=null&&shown==result){
             PreviewContent current=previewContent;boolean waitsForFrame=kind==Kind.VIDEO&&playWhenReady;
@@ -1116,6 +1121,42 @@ public final class FileViewerActivity extends Activity {
         details.setText(metadata()+" · "+office.format.label);
         if(office.limited)note("This is a partial summary. Use Open in another app for the full file.");
         textScroll.addOnLayoutChangeListener(new RestoreScroll(scrollY));
+    }
+
+    private void showDelimitedTable(PreviewResult preview){
+        CsvPreview.Result table=preview.table;
+        LinearLayout column=new LinearLayout(this);column.setOrientation(LinearLayout.VERTICAL);
+        TextView summary=text((table.limited?"Preview: ":"")+table.rows.size()+" rows · "+table.columns+" columns",13,MUTED);
+        summary.setPadding(dp(12),dp(8),dp(12),dp(8));
+        column.addView(summary,new LinearLayout.LayoutParams(-1,-2));
+        FrameLayout frame=new FrameLayout(this);
+        View grid=CsvPreviewGrid.create(this,theme,table,false);
+        frame.addView(grid,new FrameLayout.LayoutParams(-1,-1));
+        TextView literal=text(preview.text.text.isEmpty()?"This file is empty.":preview.text.text,readerSize,INK);
+        literal.setTypeface(android.graphics.Typeface.MONOSPACE);literal.setTextIsSelectable(true);
+        literal.setPadding(dp(12),dp(10),dp(12),dp(12));simpleTextLayout(literal);
+        textScroll=new EdgeFastScroll.Document(this);textScroll.setFillViewport(true);
+        textScroll.addView(literal,new ScrollView.LayoutParams(-1,-2));
+        textScroll.addOnLayoutChangeListener(new RestoreScroll(scrollY));
+        frame.addView(textScroll,new FrameLayout.LayoutParams(-1,-1));
+        column.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
+        LinearLayout tools=row();tools.setBackgroundColor(CHROME);tools.setGravity(Gravity.END);
+        Button mode=button("");formatGuideTarget=mode;
+        tools.addView(mode,new LinearLayout.LayoutParams(-2,dp(48)));
+        Button external=button("Open in another app");external.setOnClickListener(v->openExternal());
+        tools.addView(external,new LinearLayout.LayoutParams(-2,dp(48)));
+        column.addView(tools,new LinearLayout.LayoutParams(-1,-2));
+        Runnable show=()->{
+            grid.setVisibility(readerSource?View.GONE:View.VISIBLE);
+            textScroll.setVisibility(readerSource?View.VISIBLE:View.GONE);
+            mode.setText(readerSource?"Table view":"Source text");
+            if(readerSource&&preview.text.truncated)note("Source preview limited to the first 128 KiB or 2,000 lines.");
+            else if(!readerSource&&table.limited)note("Showing a limited table preview. Open the full file for all cells.");
+            else notice.setVisibility(View.GONE);
+        };
+        show.run();mode.setOnClickListener(v->{readerSource=!readerSource;show.run();});
+        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+        details.setText(metadata()+" · "+table.format.label);
     }
 
     private void showDocument(PreviewResult preview) {
@@ -1909,7 +1950,7 @@ public final class FileViewerActivity extends Activity {
         if (activeSheet != null) activeSheet.dismiss();
         String entryName = entry.name.substring(entry.name.lastIndexOf('/') + 1);
         Kind format = kindFor(entryName, mimeFor(entryName));
-        if (format == Kind.AUDIO || format == Kind.VIDEO || format == Kind.OFFICE
+        if (format == Kind.AUDIO || format == Kind.VIDEO || format == Kind.OFFICE || CsvPreview.format(entryName)!=null
                 || format == Kind.ZIP || format == Kind.SEVEN_Z || format == Kind.STREAM_ARCHIVE) {
             openArchivePreview(entry,entryName);
             return;
@@ -2508,6 +2549,7 @@ public final class FileViewerActivity extends Activity {
         String ext = extension(name);
         if ("pdf".equals(ext)) return Kind.PDF;
         if (OfficePreview.format(name)!=null) return Kind.OFFICE;
+        if (CsvPreview.format(name)!=null) return Kind.TEXT;
         if(has("svg svgz",ext))return Kind.SVG;
         if(has("md markdown",ext))return Kind.MARKDOWN;
         if(has("html htm",ext))return Kind.HTML;
@@ -2795,16 +2837,18 @@ public final class FileViewerActivity extends Activity {
         final PreviewText.Result text;
         final CodeSyntax.Model code;
         final OfficePreview.Result office;
+        final CsvPreview.Result table;
+        final boolean tableMalformed;
         final ZipDirectory.Listing archive;
         final TarArchiveListing.Listing tar;
         final int orientation,width,height,page,pageCount,bytes;
-        PreviewData(PreviewResult result){bitmap=result.bitmap;picture=result.picture;formatted=result.formatted;text=result.text;code=result.code;office=result.office;archive=result.archive;tar=result.tar;orientation=result.orientation;
+        PreviewData(PreviewResult result){bitmap=result.bitmap;picture=result.picture;formatted=result.formatted;text=result.text;code=result.code;office=result.office;table=result.table;tableMalformed=result.tableMalformed;archive=result.archive;tar=result.tar;orientation=result.orientation;
             width=result.width;height=result.height;page=result.page;pageCount=result.pageCount;
-            int count=256+result.vectorBytes+(bitmap==null?0:bitmap.getAllocationByteCount())+(text==null?0:text.text.length()*2)+(formatted==null?0:formatted.length()*4)+(code==null?0:code.memoryBytes())+(office==null?0:office.memoryBytes());
+            int count=256+result.vectorBytes+(bitmap==null?0:bitmap.getAllocationByteCount())+(text==null?0:text.text.length()*2)+(formatted==null?0:formatted.length()*4)+(code==null?0:code.memoryBytes())+(office==null?0:office.memoryBytes())+(table==null?0:table.memoryBytes());
             if(archive!=null)for(ZipDirectory.Entry entry:archive.entries)count+=80+entry.name.length()*2+(entry.rawName==null?0:entry.rawName.length()*2);
             if(tar!=null)for(TarArchiveListing.Member member:tar.entries)count+=64+member.name.length()*2;
             bytes=count;result.sharedBitmap=true;}
-        void copyTo(PreviewResult result){result.bitmap=bitmap;result.picture=picture;result.formatted=formatted;result.text=text;result.code=code;result.office=office;result.archive=archive;result.tar=tar;result.orientation=orientation;
+        void copyTo(PreviewResult result){result.bitmap=bitmap;result.picture=picture;result.formatted=formatted;result.text=text;result.code=code;result.office=office;result.table=table;result.tableMalformed=tableMalformed;result.archive=archive;result.tar=tar;result.orientation=orientation;
             result.width=width;result.height=height;result.page=page;result.pageCount=pageCount;result.sharedBitmap=true;result.cached=true;}
     }
     private static final class ViewState {
@@ -2822,6 +2866,8 @@ public final class FileViewerActivity extends Activity {
         PreviewText.Result text;
         CodeSyntax.Model code;
         OfficePreview.Result office;
+        CsvPreview.Result table;
+        boolean tableMalformed;
         PresentationSlide slide;
         boolean transportStream;
         ZipDirectory.Listing archive;
@@ -2838,7 +2884,7 @@ public final class FileViewerActivity extends Activity {
             if (bitmap != null) { if (!sharedBitmap&&!bitmap.isRecycled()) bitmap.recycle(); bitmap = null; }
             if (media != null) { try { media.close(); } catch (IOException ignored) { } media = null; }
             if (apk != null) { apk.close(); apk = null; }
-            picture=null;formatted=null;text = null;code=null;office=null;slide=null; archive = null; tar = null; sevenZip = null;
+            picture=null;formatted=null;text = null;code=null;office=null;table=null;slide=null; archive = null; tar = null; sevenZip = null;
         }
     }
 
@@ -2940,7 +2986,12 @@ public final class FileViewerActivity extends Activity {
                 } else if (kind == Kind.APK) {
                     result.apk = ApkInstallAction.inspect(context,file);
                 } else if (kind != Kind.DEX) { result.media = file; file = null; }
-                if(result.text!=null)result.code=CodeSyntax.model(sourceName,result.text.text,language);
+                if(result.text!=null){
+                    CsvPreview.Format delimiters=kind==Kind.TEXT?CsvPreview.format(sourceName):null;
+                    if(delimiters!=null)try{result.table=CsvPreview.parse(result.text,delimiters,false);}
+                    catch(CsvPreview.Malformed malformed){result.tableMalformed=true;}
+                    if(result.table==null)result.code=CodeSyntax.model(sourceName,result.text.text,language);
+                }
                 checkCancelled();
                 if(file!=null){
                     if(!result.identity.equals(RootFileProvider.identity(Os.fstat(file.getFileDescriptor())))){throw new IOException("File changed while loading.");}
@@ -3041,8 +3092,9 @@ public final class FileViewerActivity extends Activity {
     }
 
     // Inline previews use the same no-follow source and decoders, with smaller rendered images.
-    enum QuickKind { IMAGE, PDF, TEXT, AUDIO, VIDEO, UNSUPPORTED }
+    enum QuickKind { IMAGE, PDF, TEXT, TABLE, AUDIO, VIDEO, UNSUPPORTED }
     static QuickKind quickKind(String name) {
+        if(CsvPreview.format(name)!=null)return QuickKind.TABLE;
         switch (kindFor(name,mimeFor(name))) {
             case IMAGE: return QuickKind.IMAGE;
             case PDF: return QuickKind.PDF;
@@ -3063,12 +3115,19 @@ public final class FileViewerActivity extends Activity {
         try(ParcelFileDescriptor file=SafeFileAccess.open(context,entry.path(),root)) {
             long bytes=file.getStatSize();
             if(bytes<0)throw new IOException("This file cannot be read here.");
-            if(format!=QuickKind.TEXT&&bytes>MAX_DOCUMENT_BYTES)
+            if(format!=QuickKind.TEXT&&format!=QuickKind.TABLE&&bytes>MAX_DOCUMENT_BYTES)
                 throw new IOException("This file is too large for quick preview.");
-            if(format==QuickKind.TEXT) {
+            if(format==QuickKind.TEXT||format==QuickKind.TABLE) {
+                String identity=format==QuickKind.TABLE?RootFileProvider.identity(Os.fstat(file.getFileDescriptor())):null;
                 try(ParcelFileDescriptor.AutoCloseInputStream input=
                             new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) {
                     PreviewText.Result text=PreviewText.read(input);
+                    if(identity!=null){
+                        if(!identity.equals(RootFileProvider.identity(Os.fstat(file.getFileDescriptor()))))
+                            throw new IOException("The file changed. Reopen it to preview.");
+                        try{return CsvPreview.parse(text,CsvPreview.format(entry.name),true);}
+                        catch(CsvPreview.Malformed malformed){/* Show inert source instead. */}
+                    }
                     String value=text.text;
                     // The quick viewport scrolls. Keep an independent UI-layout budget.
                     int end=Math.min(value.length(),12_000),lines=0;

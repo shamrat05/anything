@@ -20,6 +20,8 @@ final class ExternalFileActions {
     static String mimeFor(String name) {
         OfficePreview.Format office = OfficePreview.format(name);
         if (office != null) return OfficePreview.mime(office);
+        CsvPreview.Format table=CsvPreview.format(name);
+        if(table!=null)return table.mime;
         int dot = name == null ? -1 : name.lastIndexOf('.');
         String ext = dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
         switch (ext) {

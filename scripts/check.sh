@@ -26,6 +26,8 @@ python3 scripts/test-rootindex.py
 python3 scripts/test-rootwatch.py
 javac --release 8 -Xlint:all,-options -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/PreviewText.java app/src/main/java/dev/fastsearch/android/ZipDirectory.java app/src/test/java/dev/fastsearch/android/PreviewDataTest.java
 java -cp app/build/preview-test-classes dev.fastsearch.android.PreviewDataTest
+javac --release 8 -Xlint:all,-options -cp app/build/preview-test-classes -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/CsvPreview.java app/src/test/java/dev/fastsearch/android/CsvPreviewTest.java
+java -cp app/build/preview-test-classes dev.fastsearch.android.CsvPreviewTest
 javac --release 8 -Xlint:all,-options -cp app/build/preview-test-classes -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/OfficePreview.java app/src/test/java/dev/fastsearch/android/OfficePreviewTest.java
 java -cp app/build/preview-test-classes dev.fastsearch.android.OfficePreviewTest
 javac --release 8 -Xlint:all,-options -cp app/build/preview-test-classes -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/CodeSyntax.java app/src/test/java/dev/fastsearch/android/CodeSyntaxTest.java

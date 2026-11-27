@@ -55,6 +55,7 @@ final class QuickPreviewCard extends LinearLayout implements AutoCloseable {
     private final Runnable prepareTimeout=this::mediaError;
     private Future<?> task;
     private ZoomPreviewView image;
+    private View tableGrid;
     private FileViewerActivity.InlineImage pixels;
     private TextureView texture;
     private Surface surface;
@@ -104,7 +105,7 @@ final class QuickPreviewCard extends LinearLayout implements AutoCloseable {
         area=new FrameLayout(context);
         area.setBackground(AppSheet.shape(theme.surface,dp(12)));
         area.setClipToOutline(true);
-        boolean text=format==FileViewerActivity.QuickKind.TEXT;
+        boolean text=format==FileViewerActivity.QuickKind.TEXT||format==FileViewerActivity.QuickKind.TABLE;
         document.addView(area,new LayoutParams(-1,text||format==FileViewerActivity.QuickKind.UNSUPPORTED?-2:previewHeight));
         status=label("",14,theme.muted);
         status.setTextIsSelectable(text);
@@ -130,7 +131,8 @@ final class QuickPreviewCard extends LinearLayout implements AutoCloseable {
         }
 
         QuickPreviewSwipe swipe=new QuickPreviewSwipe(context,previous,next,()->!closed&&!overflow
-                &&(image==null||!image.isMagnified()),
+                &&(image==null||!image.isMagnified())
+                &&(tableGrid==null||!tableGrid.canScrollHorizontally(-1)&&!tableGrid.canScrollHorizontally(1)),
                 ()->!closed&&!overflow&&!status.hasSelection());
         swipe.addView(previewScroll,new FrameLayout.LayoutParams(-1,-1));
         pages.addView(swipe,new FrameLayout.LayoutParams(-1,-1));
@@ -234,6 +236,18 @@ final class QuickPreviewCard extends LinearLayout implements AutoCloseable {
             image.setContentDescription(format==FileViewerActivity.QuickKind.PDF?"First page":"Image preview");
             area.addView(image,new FrameLayout.LayoutParams(-1,-1));
             image.setImage(pixels.bitmap,pixels.orientation);
+        } else if(result instanceof CsvPreview.Result){
+            CsvPreview.Result model=(CsvPreview.Result)result;
+            area.removeView(status);
+            LinearLayout table=new LinearLayout(getContext());table.setOrientation(VERTICAL);
+            tableGrid=CsvPreviewGrid.create(getContext(),theme,model,true);
+            table.addView(tableGrid,new LayoutParams(-1,-2));
+            if(model.limited){
+                TextView limits=label("Partial table. Use Open for more rows and columns.",12,theme.muted);
+                limits.setPadding(dp(8),dp(6),dp(8),dp(6));
+                table.addView(limits,new LayoutParams(-1,-2));
+            }
+            area.addView(table,new FrameLayout.LayoutParams(-1,-2));
         } else if(result instanceof String) {
             String text=(String)result;
             status.setGravity(Gravity.TOP|Gravity.START);
