@@ -152,7 +152,7 @@ final class PresentationSlide {
         int maxLines=Math.max(1,Math.min(40,(int)((box.height()-2*margin)/Math.max(3,paint.getFontSpacing()))));
         StaticLayout build=StaticLayout.Builder.obtain(text,0,text.length(),paint,width)
                 .setAlignment(alignment).setTextDirection(TextDirectionHeuristics.FIRSTSTRONG_LTR)
-                .setIncludePad(false).setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+                .setIncludePad(false)
                 .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
                 .setMaxLines(maxLines).setEllipsize(TextUtils.TruncateAt.END).build();
         int saved=canvas.save();
