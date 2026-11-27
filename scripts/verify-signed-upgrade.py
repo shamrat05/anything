@@ -69,7 +69,10 @@ def main():
         raise SystemExit('SMS edition mismatch. Keep variants separate.')
     if {'android.permission.INTERNET', 'android.permission.INSTALL_PACKAGES', 'android.permission.QUERY_ALL_PACKAGES'} & new_permissions:
         raise SystemExit('Unexpected network, broad package query, or silent-install permission.')
-    added_permissions = new_permissions - old_permissions
+    installer = 'android.permission.REQUEST_INSTALL_PACKAGES'
+    if installer not in new_permissions:
+        raise SystemExit('GitHub edition must keep the user-confirmed APK installer.')
+    added_permissions = new_permissions - old_permissions - {installer}
     if added_permissions:
         raise SystemExit('Upgrade requests permissions absent in the previous edition: ' + ', '.join(sorted(added_permissions)))
     print(f'Signature, package, version and edition match: {args.edition} {old_name} ({old_code}) → {new_name} ({new_code}).')

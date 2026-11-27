@@ -27,8 +27,8 @@ android {
     buildFeatures { buildConfig true }
     flavorDimensions += 'distribution'
     productFlavors {
-        full { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'true'; buildConfigField 'boolean', 'APK_INSTALL_ENABLED', 'false' }
-        github { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'false'; buildConfigField 'boolean', 'APK_INSTALL_ENABLED', 'false' }
+        full { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'true'; buildConfigField 'boolean', 'APK_INSTALL_ENABLED', 'true' }
+        github { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'false'; buildConfigField 'boolean', 'APK_INSTALL_ENABLED', 'true' }
         play { dimension 'distribution'; buildConfigField 'boolean', 'SMS_ENABLED', 'false'; buildConfigField 'boolean', 'APK_INSTALL_ENABLED', 'false' }
     }
     sourceSets {
