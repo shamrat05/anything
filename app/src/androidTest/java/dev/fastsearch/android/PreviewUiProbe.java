@@ -85,6 +85,7 @@ public final class PreviewUiProbe extends Instrumentation {
             else if(arguments!=null&&"unknownText".equals(arguments.getString("phase"))){unknownText();passed=true;}
             else if(arguments!=null&&"codeText".equals(arguments.getString("phase"))){codeText();passed=true;}
             else if(arguments!=null&&"office".equals(arguments.getString("phase"))){officeSummary();passed=true;}
+            else if(arguments!=null&&"xlsx".equals(arguments.getString("phase"))){worksheetGrid();passed=true;}
             else if(arguments!=null&&"viewerDelete".equals(arguments.getString("phase"))){
                 viewerDelete();passed=true;
             }
@@ -1208,24 +1209,63 @@ public final class PreviewUiProbe extends Instrumentation {
             check(ExternalFileActions.mimeFor(word.getName()).equals(OfficePreview.mime(OfficePreview.Format.WORD)),"handler receives actual Office MIME");
         });
         close(activity);
+        worksheetGrid();
+        visualPresentation();
+    }
+
+    private void worksheetGrid() throws Exception {
         String storage="http://schemas.openxmlformats.org/spreadsheetml/2006/main";
         String relation="http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         String packageNs="http://schemas.openxmlformats.org/package/2006/relationships";
         File workbook=new File(fixture,"field-workbook.xlsx");
         officeFixture(workbook,
-            "xl/workbook.xml","<workbook xmlns='"+storage+"' xmlns:r='"+relation+"'><sheets><sheet name='Field test' r:id='s'/></sheets></workbook>",
-            "xl/_rels/workbook.xml.rels","<Relationships xmlns='"+packageNs+"'><Relationship Id='s' Type='"+relation+"/worksheet' Target='worksheets/result.xml'/></Relationships>",
-            "xl/worksheets/result.xml","<worksheet xmlns='"+storage+"'><sheetData><row r='7'><c r='A7' t='inlineStr'><is><t>Passes</t></is></c><c r='B7'><f>1+2</f><v>3</v></c></row></sheetData></worksheet>");
+            "xl/workbook.xml","<workbook xmlns='"+storage+"' xmlns:r='"+relation+"'><sheets>"
+                    +"<sheet name='Field test' r:id='s'/><sheet name='Private' state='hidden' r:id='h'/>"
+                    +"<sheet name='Second worksheet' r:id='t'/></sheets></workbook>",
+            "xl/_rels/workbook.xml.rels","<Relationships xmlns='"+packageNs+"'><Relationship Id='s' Type='"+relation
+                    +"/worksheet' Target='worksheets/result.xml'/><Relationship Id='h' Type='"+relation
+                    +"/worksheet' Target='worksheets/private.xml'/><Relationship Id='t' Type='"+relation
+                    +"/worksheet' Target='worksheets/other.xml'/></Relationships>",
+            "xl/worksheets/result.xml","<worksheet xmlns='"+storage+"'><sheetData><row r='7'><c r='A7' t='inlineStr'>"
+                    +"<is><t>Passes</t></is></c><c r='B7'><f>1+2</f><v>3</v></c></row></sheetData></worksheet>",
+            "xl/worksheets/other.xml","<worksheet xmlns='"+storage+"'><sheetData><row r='20'><c r='C20' t='inlineStr'>"
+                    +"<is><t>Second value</t></is></c></row></sheetData></worksheet>");
         FileViewerActivity sheet=open(issue(workbook),workbook.getName());
         main(()->{
-            OfficePreview.Result data=(OfficePreview.Result)field(field(sheet,"shown"),"office");
-            check(data.sections.size()==1&&data.sections.get(0).title.equals("Field test"),"XLSX opens its named worksheet");
-            String row=data.sections.get(0).text;
-            check(row.contains("7   A Passes")&&row.contains("B 3")&&!row.contains("1+2"),"XLSX shows cached cells without executing a formula");
-            check(ExternalFileActions.mimeFor(workbook.getName()).equals(OfficePreview.mime(data.format)),"XLSX handler MIME");
+            OfficePreview.Worksheet data=(OfficePreview.Worksheet)field(field(sheet,"shown"),"worksheet");
+            check(data!=null&&data.names.size()==2&&data.title().equals("Field test"),"XLSX opens first visible named worksheet");
+            check(containsClass(content(sheet),CsvPreviewGrid.class.getName()),"worksheet uses native grid, not a text summary");
+            check(ExternalFileActions.mimeFor(workbook.getName()).equals(OfficePreview.mime(OfficePreview.Format.SHEET)),"XLSX handler MIME");
+            Button values=button(content(sheet),"Values as text");
+            check(values!=null&&values.performClick(),"switch to selectable worksheet values");
+            TextView row=visibleTextView(content(sheet),data.summary);
+            check(row!=null&&row.isTextSelectable()&&data.summary.contains("7   A Passes")&&data.summary.contains("B 3")
+                    &&!data.summary.contains("1+2"),"shows saved values and never formula instructions");
+            check(button(content(sheet),"Grid").performClick(),"return to grid");
+            View selector=(View)field(sheet,"formatGuideTarget");
+            check(selector!=null&&selector.performClick(),"open worksheet picker");
+            AppSheet picker=(AppSheet)field(sheet,"activeSheet");
+            check(picker!=null&&picker.isShowing()&&button(picker.content,"Private")==null,"picker excludes hidden worksheet");
+            Button second=button(picker.content,"Second worksheet");
+            check(second!=null&&second.performClick(),"select second visible worksheet");
         });
+        await(()->{
+            AtomicBoolean ready=new AtomicBoolean();
+            main(()->{
+                Object shown=field(sheet,"shown");
+                OfficePreview.Worksheet current=shown==null?null:(OfficePreview.Worksheet)field(shown,"worksheet");
+                ready.set(current!=null&&current.index==1&&current.rowNumbers.get(0)==20
+                        &&current.rows.get(0).get(2).equals("Second value"));
+            });
+            return ready.get();
+        },12_000,"new worksheet opens lazily with original row and column coordinates");
         close(sheet);
-        visualPresentation();
+        FileEntry entry=new FileEntry(workbook.getCanonicalPath(),false,workbook.length(),workbook.lastModified());
+        FileViewerActivity.QuickKind format=FileViewerActivity.quickKind(entry.name);
+        check(format==FileViewerActivity.QuickKind.WORKSHEET,"XLSX recognized by Quick Preview");
+        Object preview=FileViewerActivity.readInline(target,entry,false,format);
+        check(preview instanceof OfficePreview.Worksheet&&((OfficePreview.Worksheet)preview).index==0
+                &&((OfficePreview.Worksheet)preview).rows.get(0).get(0).equals("Passes"),"quick reader opens bounded first visible worksheet");
     }
 
     private void visualPresentation()throws Exception{

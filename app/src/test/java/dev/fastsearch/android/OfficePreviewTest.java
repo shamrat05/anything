@@ -25,7 +25,7 @@ public final class OfficePreviewTest {
         check(OfficePreview.format("letter.DOCX")==OfficePreview.Format.WORD,"DOCX case independent");
         check(OfficePreview.format("macro.docm")==null&&OfficePreview.format("early.xls")==null,"legacy and macro formats aren't interpreted");
         check(OfficePreview.mime(OfficePreview.Format.SHEET).endsWith("spreadsheetml.sheet"),"keep true spreadsheet MIME");
-        word(); sheets(); slides(); slidePages(); limits();
+        word(); sheets(); worksheetGrids(); slides(); slidePages(); limits();
         System.out.println("PASS "+checks+" read-only Office checks.");
     }
 
@@ -63,6 +63,75 @@ public final class OfficePreviewTest {
         check(body.startsWith("1000000   A Unit sales")&&body.contains("1000001   B Inline"),"sparse and inline values without dense allocation");
         check(body.contains("D 3")&&body.contains("E [formula without saved value]")&&!body.contains("1+2")&&!body.contains("8+9"),"saved formula value only");
         check(body.contains("L TRUE")&&!body.contains("999")&&!body.contains("Hidden data"),"bounded columns and hidden sheet isolation");
+    }
+
+    private static void worksheetGrids() throws Exception {
+        Map<String,byte[]> parts=entries("xl/workbook.xml","<workbook xmlns='"+S+"' xmlns:r='"+R+"'><sheets>"
+                +"<sheet name='Private' state='veryHidden' r:id='private'/><sheet name='Overview' r:id='summary'/>"
+                +"<sheet name='Foreign' r:id='foreign'/><sheet name='Broken' r:id='broken'/>"
+                +"<sheet name='Details' r:id='details'/></sheets></workbook>");
+        parts.putAll(entries("xl/_rels/workbook.xml.rels",rels(rel("private","worksheet","worksheets/private.xml","")
+                +rel("summary","worksheet","/xl/worksheets/summary.xml","")
+                +rel("foreign","worksheet","https://example.invalid/spreadsheet.xml","External")
+                +rel("broken","worksheet","worksheets/broken.xml","")
+                +rel("details","worksheet","worksheets/detail.xml",""))));
+        parts.putAll(entries("xl/sharedStrings.xml","<sst xmlns='"+S+"'><si><r><t>Shared</t></r>"
+                +"<rPh><t>Not a cell value</t></rPh><r><t> বাংলা</t></r></si></sst>"));
+        parts.putAll(entries("xl/worksheets/private.xml",grid("<row><c><v>private data</v></c></row>")));
+        parts.putAll(entries("xl/worksheets/broken.xml","<!DOCTYPE worksheet SYSTEM 'https://example.invalid/no'>"+grid("")));
+        parts.putAll(entries("xl/vbaProject.bin","Never opened"));
+        parts.putAll(entries("xl/worksheets/summary.xml",grid(
+                "<row r='2'><c r='A2' t='s'><v>0</v></c><c r='C2' t='inlineStr'><is><t xml:space='preserve'> =literal </t></is></c>"
+                +"<c r='E2'><f>Not readable or executed</f><v>19.5</v></c><c r='F2'><f>NO CACHE</f></c>"
+                +"<c r='H2' t='b'><v>1</v></c><c r='K2' t='e'><v>#DIV/0!</v></c>"
+                +"<c r='P2' t='str'><v>https://example.invalid/literal</v></c><c r='Q2'><v>too far</v></c></row>"
+                +"<row r='4' hidden='1'><c r='A4'><v>hidden row</v></c></row>"
+                +"<row r='20'><c r='B20' t='inlineStr'><is><r><t>Leading</t></r><rPh><t>Phonetic</t></rPh>"
+                +"<r><t>&#10;trailing</t></r></is></c><c r='D21'><v>wrong row</v></c>"
+                +"<c r='F20' t='s'><v>99</v></c></row>"
+                +"<row><c r='A1000001'><v>0</v></c><c><v>2</v></c></row>")));
+        StringBuilder detail=new StringBuilder();
+        for(int row=1;row<=85;row++)detail.append("<row r='").append(row).append("'><c r='A").append(row)
+                .append("' t='inlineStr'><is><t>").append(row==1?repeat("a",159)+"★"+repeat("b",621):"value")
+                .append("</t></is></c></row>");
+        parts.putAll(entries("xl/worksheets/detail.xml",grid(detail.toString())));
+        OfficePreview.Worksheet full=worksheet(parts,0,false);
+        check(full.names.equals(java.util.Arrays.asList("Overview","Broken","Details")),"selector preserves workbook order excluding hidden and external sheets");
+        check(full.title().equals("Overview")&&full.index==0,"starts in first allowed worksheet");
+        check(full.rowNumbers.equals(java.util.Arrays.asList(2,20,1_000_001)),"worksheet row labels preserve sparse coordinates");
+        check(full.rows.get(0).get(0).equals("Shared বাংলা"),"shared rich strings preserve scripts and skip phonetic guides");
+        check(full.rows.get(0).get(1).isEmpty()&&full.rows.get(0).get(2).equals(" =literal "),"blank columns and literal inline values");
+        check(full.rows.get(0).get(4).equals("19.5")&&full.rows.get(0).get(5).equals("[no saved value]"),"only saved formula result is read");
+        check(full.rows.get(0).get(7).equals("TRUE")&&full.rows.get(0).get(10).equals("#DIV/0!"),"boolean and error cell values");
+        check(full.columns==16&&full.rows.get(0).get(15).equals("https://example.invalid/literal"),"last allowed column and literal URI");
+        check(full.rows.get(1).get(1).equals("Leading\ntrailing")&&full.rows.get(1).get(3).isEmpty(),
+                "parse rich inline strings and reject mismatched coordinates");
+        check(full.rows.get(1).get(5).equals("[text outside preview]")&&full.rows.get(2).get(1).equals("2"),"unavailable string slot and implicit next column");
+        check(full.summary.contains("20   B Leading trailing")&&!full.summary.contains("Not readable or executed")
+                &&!full.summary.contains("hidden row")&&!full.summary.contains("too far")&&full.limited,"bounded flat copy text carries no hidden or executable content");
+        OfficePreview.Worksheet quick=worksheet(parts,0,true);
+        check(quick.title().equals(full.title())&&quick.columns==6&&quick.rows.get(0).size()==6&&quick.summary.isEmpty(),"quick grid reuses worksheet reader with compact caps");
+        OfficePreview.Worksheet switched=worksheet(parts,2,false);
+        check(switched.title().equals("Details")&&switched.rowNumbers.get(79)==80&&switched.limited,"switch worksheets lazily and cap full row count");
+        check(switched.rows.get(0).get(0).length()==640,"cap stored characters per full cell");
+        OfficePreview.Worksheet shortGrid=worksheet(parts,408,true);
+        check(shortGrid.title().equals("Details")&&shortGrid.rows.size()==12&&shortGrid.rows.get(0).get(0).length()==160,
+                "clamp selected index and cap compact rows and characters");
+        check(shortGrid.rows.get(0).get(0).endsWith("★"),"trim text at safe boundary");
+        try{worksheet(parts,1,false);throw new AssertionError("DTD allowed in selected sheet");}
+        catch(IOException expected){checks++;}
+        parts.putAll(entries("xl/worksheets/broken.xml",grid("")));
+        OfficePreview.Worksheet empty=worksheet(parts,1,false);
+        check(empty.columns==0&&empty.rows.isEmpty()&&empty.summary.isEmpty(),"empty worksheet is a valid selectable page");
+        try{worksheet(entries("xl/workbook.xml","<workbook xmlns='"+S+"'/>"),0,true);throw new AssertionError("broken workbook accepted");}
+        catch(IOException expected){checks++;}
+    }
+
+    private static String grid(String rows){return "<worksheet xmlns='"+S+"'><sheetData>"+rows+"</sheetData></worksheet>";}
+    private static OfficePreview.Worksheet worksheet(Map<String,byte[]> parts,int index,boolean compact) throws IOException {
+        Path temp=zip(parts);
+        try(FileChannel file=FileChannel.open(temp,StandardOpenOption.READ)){return OfficePreview.readWorksheet(file,index,compact);}
+        finally{Files.delete(temp);}
     }
 
     private static void slides() throws Exception {

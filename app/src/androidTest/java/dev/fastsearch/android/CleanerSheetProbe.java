@@ -23,10 +23,11 @@ import java.util.function.BooleanSupplier;
 /** Runs the actual Cleaner view against an isolated synthetic scanner; never touches shared files. */
 public final class CleanerSheetProbe extends Instrumentation {
     private int checks;
-    private boolean realShared;
+    private boolean realShared,previewOnly;
     private final AtomicReference<Throwable> callbackFailure=new AtomicReference<>();
     @Override public void onCreate(Bundle args){super.onCreate(args);
         realShared=args!=null&&"true".equals(args.getString("emulatorShared"));
+        previewOnly=args!=null&&"preview".equals(args.getString("phase"));
         start();
     }
     @Override public void onStart(){
@@ -36,8 +37,14 @@ public final class CleanerSheetProbe extends Instrumentation {
             if(!getTargetContext().getPackageName().endsWith(".fresh"))throw new AssertionError("Isolated build required");
             host=startActivitySync(new Intent(getTargetContext(),MainActivity.class)
                     .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("permissionProbe",true));
-            if(realShared){exerciseSharedEngine();exerciseThumbnailCache();exerciseDownloadRecommendations();}
-            exercise(host);exerciseDuplicateReview(host);verifySidebar(host);passed=true;
+            if(previewOnly){
+                check(realShared,"the shared preview phase requires emulatorShared=true");
+                exerciseInPlacePreview(host);
+            }else{
+                if(realShared){exerciseSharedEngine();exerciseThumbnailCache();exerciseDownloadRecommendations();}
+                exercise(host);exerciseDuplicateReview(host);verifySidebar(host);
+            }
+            passed=true;
             result.putString("stream","PASS "+checks+" Cleaner UI assertions."+System.lineSeparator());
         }catch(Throwable failure){result.putString("stream",android.util.Log.getStackTraceString(failure));}
         finally{if(host!=null){Activity open=host;runOnMainSync(open::finish);}}
@@ -311,6 +318,170 @@ public final class CleanerSheetProbe extends Instrumentation {
         });
     }
 
+    private void exerciseInPlacePreview(Activity host)throws Exception {
+        String hardware=android.os.Build.HARDWARE;
+        check("ranchu".equals(hardware)||"goldfish".equals(hardware),
+                "shared fixture writes require a disposable Android emulator");
+        java.nio.file.Path volume=android.os.Environment.getExternalStorageDirectory().getCanonicalFile().toPath();
+        java.nio.file.Path downloads=volume.resolve(android.os.Environment.DIRECTORY_DOWNLOADS);
+        java.nio.file.Files.createDirectories(downloads);
+        java.nio.file.Path scratch=java.nio.file.Files.createTempDirectory(downloads,"Anything-Cleaner-Preview-");
+        java.nio.file.Path vault=scratch.resolve("Vault");
+        java.nio.file.Path replacement=scratch.resolve("same-content-replacement.tmp");
+        String text="Owned synthetic Cleaner read-only preview content.";
+        byte[] bytes=text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        final int extras=24;
+        java.util.ArrayList<java.nio.file.Path> fixtures=new java.util.ArrayList<>();
+        AtomicReference<CleanerSheet> panel=new AtomicReference<>();
+        AtomicReference<AppSheet> owner=new AtomicReference<>(),detail=new AtomicReference<>();
+        AtomicReference<CleanerSheet.Row> selected=new AtomicReference<>();
+        final int[] position=new int[2];
+        try{
+            java.nio.file.Files.createDirectory(vault);
+            fixtures.add(java.nio.file.Files.write(vault.resolve("review-fixture-original.txt"),bytes));
+            for(int i=0;i<extras;i++)fixtures.add(java.nio.file.Files.write(scratch.resolve(
+                    String.format(java.util.Locale.ROOT,"review-fixture-%02d.txt",i)),bytes));
+            main(()->{
+                java.lang.reflect.Constructor<CleanerSheet> ctor=CleanerSheet.class.getDeclaredConstructor(Activity.class,
+                        FileIndex.class,java.util.Map.class,CleanerSheet.Scanner.class,java.util.function.Consumer.class,java.util.function.Consumer.class);
+                ctor.setAccessible(true);
+                panel.set(ctor.newInstance(host,FileIndex.get(host),Collections.singletonMap(volume.toString(),"Internal storage"),
+                        CleanerReviewScanner.INSTANCE,null,null));
+                owner.set((AppSheet)get(panel.get(),"sheet"));
+                set(host,"activeSheet",owner.get());
+                java.lang.reflect.Method open=MainActivity.class.getDeclaredMethod("openCleanerPreview",
+                        AppSheet.class,FileEntry.class,String.class,Runnable.class);
+                open.setAccessible(true);
+                set(panel.get(),"preview",(CleanerSheet.PreviewLaunch)(sheet,entry,revision,returned)->{
+                    try{open.invoke(host,sheet,entry,revision,returned);}
+                    catch(ReflectiveOperationException failed){throw new AssertionError(failed);}
+                });
+                owner.get().show();
+                choose(panel.get(),scratch.toString());
+                button(owner.get().actions,"Scan folder").performClick();
+            });
+            await(()->readRows(panel.get())==extras+2,"production scan finds one exact group and its owned files");
+            main(()->((android.widget.EditText)get(panel.get(),"resultSearch")).setText("review-fixture"));
+            await(()->mainCondition(()->"review-fixture".equals(get(panel.get(),"resultQuery"))),
+                    "result text filter applies before opening preview");
+            main(()->{
+                button(owner.get().content,"Select matching extras").performClick();
+                button(owner.get().content,"Show selected").performClick();
+                ListView list=(ListView)get(panel.get(),"files");
+                check(list.getCount()==extras+1,"selected-only keeps the group and every eligible owned extra");
+                list.setSelectionFromTop(6,-8);
+            });
+            await(()->mainCondition(()->{
+                ListView list=(ListView)get(panel.get(),"files");
+                return list.getFirstVisiblePosition()>=5&&list.getChildAt(0)!=null;
+            }),"list reaches a noninitial scroll position");
+            main(()->{
+                ListView list=(ListView)get(panel.get(),"files");
+                position[0]=list.getFirstVisiblePosition();position[1]=list.getChildAt(0).getTop();
+                selected.set((CleanerSheet.Row)list.getAdapter().getItem(position[0]));
+                View row=list.getAdapter().getView(position[0],null,list);
+                check(byDescription(row,"Preview "+selected.get().entry.name)!=null,"row shows a separate Preview action");
+                list.performItemClick(null,position[0],position[0]);
+                detail.set((AppSheet)get(panel.get(),"secondary"));
+                check(detail.get()!=null&&detail.get().isShowing(),"review detail stays mounted for the preview handoff");
+            });
+
+            ActivityMonitor monitor=addMonitor(FileViewerActivity.class.getName(),null,false);
+            FileViewerActivity viewer;
+            try{
+                main(()->button(detail.get().content,"Preview file").performClick());
+                viewer=(FileViewerActivity)monitor.waitForActivityWithTimeout(6500);
+            }finally{removeMonitor(monitor);}
+            check(viewer!=null,"detail button reaches the real built-in viewer");
+            await(()->mainCondition(()->{
+                Object shown=get(viewer,"shown");
+                return Boolean.TRUE.equals(get(viewer,"cleanerReview"))&&shown!=null
+                        &&get(shown,"text") instanceof PreviewText.Result
+                        &&text.equals(((PreviewText.Result)get(shown,"text")).text);
+            }),"viewer decodes real text in read-only review mode");
+            main(()->{
+                check(viewer.getIntent().getData()==null&&!viewer.getIntent().hasExtra(Intent.EXTRA_STREAM),
+                        "internal preview uses no sharing URI");
+                PreviewSession session=(PreviewSession)get(viewer,"session");
+                check(session!=null&&!session.root&&session.entries.size()==1
+                        &&session.entries.get(0).pathEquals(selected.get().entry.path()),"single ordinary reviewed path, no Root");
+                check(!viewer.findViewById(R.id.preview_select).isShown()
+                        &&!viewer.findViewById(R.id.preview_copy).isShown(),"file selection and transfer controls are not exposed");
+            });
+            sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK);
+            await(()->mainCondition(()->get(host,"activeSheet")==owner.get()&&get(host,"cleanerPreviewOwner")==null),
+                    "hardware Back returns to the original Cleaner instance");
+            await(()->mainCondition(()->{
+                ListView list=(ListView)get(panel.get(),"files");
+                return list.getFirstVisiblePosition()==position[0]&&list.getChildAt(0)!=null
+                        &&list.getChildAt(0).getTop()==position[1];
+            }),"list anchor and exact pixel offset restore");
+            main(()->{
+                ListView list=(ListView)get(panel.get(),"files");
+                check(get(panel.get(),"secondary")==detail.get()&&detail.get().isShowing(),"same file detail is visible first");
+                check("review-fixture".equals(get(panel.get(),"resultQuery"))&&Boolean.TRUE.equals(get(panel.get(),"onlySelected"))
+                        &&panel.get().duplicateReview.snapshot().size()==extras&&list.getCount()==extras+1
+                        &&list.getAdapter().getItem(0) instanceof DuplicateReview.Group,
+                        "text filter, selected-only view, group and selections survive Back");
+                detail.get().dismiss();
+            });
+            await(()->mainCondition(()->get(panel.get(),"secondary")==null),"file detail dismisses before row Preview");
+            ActivityMonitor directMonitor=addMonitor(FileViewerActivity.class.getName(),null,false);
+            try{
+                main(()->{
+                    ListView list=(ListView)get(panel.get(),"files");
+                    View action=byDescription(list.getChildAt(0),"Preview "+selected.get().entry.name);
+                    check(action!=null&&action.isShown()&&action.performClick(),"visible result-row Preview opens directly");
+                });
+                Activity direct=directMonitor.waitForActivityWithTimeout(6500);
+                check(direct instanceof FileViewerActivity,"row Preview reaches the same native viewer path");
+                await(()->mainCondition(()->Boolean.TRUE.equals(get(direct,"cleanerReview"))&&get(direct,"shown")!=null),
+                        "row preview finishes in read-only mode");
+                sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK);
+            }finally{removeMonitor(directMonitor);}
+            await(()->mainCondition(()->{
+                ListView list=(ListView)get(panel.get(),"files");
+                return get(host,"cleanerPreviewOwner")==null&&get(panel.get(),"secondary")==null
+                        &&list.getFirstVisiblePosition()==position[0]&&list.getChildAt(0)!=null
+                        &&list.getChildAt(0).getTop()==position[1]&&panel.get().duplicateReview.selectedCount()==extras;
+            }),"Back from a direct row returns to its list, exactly where the player opened it");
+
+            java.nio.file.Path target=java.nio.file.Paths.get(selected.get().entry.path());
+            check(Arrays.equals(bytes,java.nio.file.Files.readAllBytes(target)),"file is unchanged by preview");
+            java.nio.file.Files.write(replacement,bytes);
+            java.nio.file.Files.move(replacement,target,java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            ActivityMonitor stale=addMonitor(FileViewerActivity.class.getName(),null,false);
+            try{
+                main(()->{
+                    ListView list=(ListView)get(panel.get(),"files");
+                    View row=list.getAdapter().getView(position[0],null,list);
+                    View direct=byDescription(row,"Preview "+selected.get().entry.name);
+                    check(direct!=null&&direct.performClick(),"same Preview action is tappable directly on its row");
+                });
+                await(()->mainCondition(()->get(panel.get(),"previewTask")==null),"stale-source check completes");
+                check(stale.waitForActivityWithTimeout(500)==null,"same-content replacement is refused: identity no longer matches");
+            }finally{removeMonitor(stale);}
+            check(Arrays.equals(bytes,java.nio.file.Files.readAllBytes(target)),"stale preview also leaves the owned source intact");
+        }finally{
+            if(owner.get()!=null)main(()->{owner.get().dismiss();if(get(host,"activeSheet")==owner.get())set(host,"activeSheet",null);});
+            for(java.nio.file.Path path:fixtures)java.nio.file.Files.deleteIfExists(path);
+            java.nio.file.Files.deleteIfExists(replacement);
+            java.nio.file.Files.deleteIfExists(vault);java.nio.file.Files.deleteIfExists(scratch);
+        }
+    }
+
+    private interface CheckedCondition {boolean matches()throws Exception;}
+    private boolean mainCondition(CheckedCondition condition){
+        AtomicBoolean result=new AtomicBoolean();
+        try{main(()->result.set(condition.matches()));}
+        catch(Exception unable){throw new AssertionError(unable);}
+        return result.get();
+    }
+    private static void set(Object owner,String name,Object value)throws Exception{
+        java.lang.reflect.Field field=owner.getClass().getDeclaredField(name);
+        field.setAccessible(true);field.set(owner,value);
+    }
+
     private void verifySidebar(Activity host)throws Exception {
         for(String[] shortcut:new String[][]{{"Cleaner","Likely junk"},{"Duplicate finder","Exact duplicates"}}){
             main(()->{
@@ -361,7 +532,19 @@ public final class CleanerSheetProbe extends Instrumentation {
     }
 
     private static Button button(View view,String label){
-        View result=find(view,label);if(!(result instanceof Button))throw new AssertionError("Missing "+label);return (Button)result;
+        View result=find(view,label);
+        if(!(result instanceof Button)){
+            java.util.List<String> visible=new java.util.ArrayList<>();
+            buttonLabels(view,visible);
+            throw new AssertionError("Missing "+label+"; panel button labels: "+visible);
+        }
+        return (Button)result;
+    }
+    private static void buttonLabels(View view,java.util.List<String> out){
+        if(out.size()>=16||view.getVisibility()!=View.VISIBLE)return;
+        if(view instanceof Button&&((Button)view).getText().length()>0)out.add(((Button)view).getText().toString());
+        if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++)
+            buttonLabels(((ViewGroup)view).getChildAt(i),out);
     }
     private void await(BooleanSupplier condition,String label) {
         long deadline=SystemClock.elapsedRealtime()+6000;

@@ -138,6 +138,165 @@ final class OfficePreview {
         return new Result(format, doc.sections, doc.limited);
     }
 
+    private static final int MAX_GRID_SHEETS=128, MAX_GRID_ROWS=80, MAX_GRID_COLUMNS=16,
+            QUICK_GRID_ROWS=12, QUICK_GRID_COLUMNS=6, QUICK_GRID_CELL=160;
+
+    static final class Worksheet {
+        final List<String> names;
+        final List<List<String>> rows;
+        final List<Integer> rowNumbers;
+        final int index,columns;
+        final String summary;
+        final boolean limited;
+        Worksheet(List<String> names,int index,GridSheet grid,boolean limited) {
+            this.names=Collections.unmodifiableList(new ArrayList<>(names));this.index=index;
+            this.rows=Collections.unmodifiableList(grid.rows);this.rowNumbers=Collections.unmodifiableList(grid.numbers);
+            this.columns=grid.columns;this.summary=grid.summary.toString();this.limited=limited;
+        }
+        String title(){return names.get(index);}
+    }
+
+    /** Read one public worksheet and its bounded shared-string dictionary; formulas are never parsed. */
+    static Worksheet readWorksheet(FileChannel file,int requestedIndex,boolean compact) throws IOException {
+        if(file.size()>MAX_FILE)throw limit();
+        ZipDirectory.Listing listing;
+        try{listing=ZipDirectory.read(file);}catch(IOException bad){PreviewText.cancelled();throw invalid();}
+        if(listing.truncated||listing.totalEntries>ZipDirectory.MAX_ENTRIES)throw limit();
+        Map<String,ZipDirectory.Entry> entries=new HashMap<>();
+        for(ZipDirectory.Entry entry:listing.entries){
+            if(entry.rawName!=null&&!entry.directory&&entry.rawName.startsWith("xl/")
+                    &&entries.put(entry.rawName,entry)!=null)throw invalid();
+        }
+        Document doc=new Document(file,entries);
+        Index index=new Index(doc,true,MAX_GRID_SHEETS);
+        doc.parse("xl/workbook.xml",index);
+        Relations rel=new Relations(doc,"xl","worksheets","worksheet");
+        doc.parse("xl/_rels/workbook.xml.rels",rel);
+        ArrayList<String> names=new ArrayList<>(),targets=new ArrayList<>();
+        for(Part part:index.parts){
+            String target=rel.parts.get(part.id);
+            if(target==null||!entries.containsKey(target)){doc.limited=true;continue;}
+            names.add(part.title);targets.add(target);
+        }
+        if(names.isEmpty())throw invalid();
+        int selected=Math.max(0,Math.min(requestedIndex,names.size()-1));
+        Shared shared=new Shared(doc);
+        if(entries.containsKey("xl/sharedStrings.xml"))doc.parse("xl/sharedStrings.xml",shared);
+        GridSheet grid=new GridSheet(doc,shared.values,compact);
+        doc.parse(targets.get(selected),grid);
+        return new Worksheet(names,selected,grid,doc.limited);
+    }
+
+    private static final class GridSheet extends Walker {
+        final ArrayList<List<String>> rows=new ArrayList<>();
+        final ArrayList<Integer> numbers=new ArrayList<>();
+        final StringBuilder value=new StringBuilder(),summary=new StringBuilder();
+        final List<String> shared;
+        final int rowCap,colCap,cellCap;
+        final boolean compact;
+        final String[] cells;
+        int sheetData,rowDepth,cellDepth,valueDepth,inlineDepth,runDepth,rowNum,lastRow,implicitColumn,col,columns;
+        boolean formula,valueSeen,rowInferred,hidden;
+        String type;
+        GridSheet(Document d,List<String> shared,boolean compact){
+            super(d,"worksheet",S,SS);this.shared=shared;this.compact=compact;
+            rowCap=compact?QUICK_GRID_ROWS:MAX_GRID_ROWS;
+            colCap=compact?QUICK_GRID_COLUMNS:MAX_GRID_COLUMNS;
+            cellCap=compact?QUICK_GRID_CELL:MAX_SEGMENT;
+            cells=new String[colCap];
+        }
+        @Override void start(String uri,String n,Attributes attrs){
+            if(!match(uri,S,SS))return;
+            if(depth==2&&"sheetData".equals(n)){sheetData=depth;return;}
+            if(sheetData==0)return;
+            if(depth==sheetData+1&&"row".equals(n)){
+                rowDepth=depth;implicitColumn=0;
+                String seq=attrs.getValue("r");
+                rowInferred=seq==null;
+                rowNum=positive(seq,1_048_576,seq==null?lastRow+1:0);
+                String hiddenFlag=attrs.getValue("hidden");
+                hidden="1".equals(hiddenFlag)||"true".equals(hiddenFlag);
+                java.util.Arrays.fill(cells,null);
+                if(rowNum<=lastRow||rowNum>1_048_576){doc.limited=true;rowNum=0;}
+                return;
+            }
+            if(rowDepth==0||rowNum==0||hidden)return;
+            if(depth==rowDepth+1&&"c".equals(n)){
+                cellDepth=depth;value.setLength(0);formula=false;valueSeen=false;
+                String ref=attrs.getValue("r");type=attrs.getValue("t");
+                col=column(ref,implicitColumn);
+                if(ref!=null&&col>=0&&col<16_384){
+                    int split=ref.length()-1;
+                    while(split>=0&&ref.charAt(split)>='0'&&ref.charAt(split)<='9')split--;
+                    int addressedRow=positive(ref.substring(split+1),1_048_576,0);
+                    if(rowInferred&&implicitColumn==0&&addressedRow>lastRow)rowNum=addressedRow;
+                    if(addressedRow!=rowNum)col=16_384;
+                }
+                if(col>=0&&col<16_384)implicitColumn=Math.max(implicitColumn,col+1);
+                return;
+            }
+            if(cellDepth==0||col<0||col>=colCap||rows.size()>=rowCap)return;
+            if(depth==cellDepth+1){
+                if("f".equals(n))formula=true;
+                else if("v".equals(n)&&!"inlineStr".equals(type)&&!valueSeen){valueSeen=true;valueDepth=depth;}
+                else if("is".equals(n)&&"inlineStr".equals(type)&&!valueSeen){valueSeen=true;inlineDepth=depth;}
+            }else if(inlineDepth>0&&depth==inlineDepth+1&&"r".equals(n))runDepth=depth;
+            if("t".equals(n)&&inlineDepth>0&&(depth==inlineDepth+1||runDepth>0&&depth==runDepth+1))valueDepth=depth;
+        }
+        @Override void chars(char[] c,int from,int n){
+            if(valueDepth>0&&depth==valueDepth)appendChars(value,c,from,n,cellCap);
+        }
+        @Override void end(String uri,String n){
+            if(depth==valueDepth)valueDepth=0;
+            if(depth==runDepth)runDepth=0;
+            if(depth==inlineDepth)inlineDepth=0;
+            if(depth==cellDepth){
+                if(col<0||col>=colCap||rows.size()>=rowCap||cells[col]!=null)doc.limited=true;
+                else cells[col]=cellValue();
+                cellDepth=0;
+            }
+            if(depth==rowDepth){
+                if(rowNum>lastRow)lastRow=rowNum;
+                if(hidden)doc.limited=true;
+                else if(rowNum>0&&rows.size()<rowCap){
+                    int count=0;
+                    for(int i=0;i<cells.length;i++)if(cells[i]!=null&&!cells[i].isEmpty())count=i+1;
+                    if(count>0){
+                        List<String> row=new ArrayList<>(count);
+                        for(int i=0;i<count;i++)row.add(cells[i]==null?"":cells[i]);
+                        rows.add(Collections.unmodifiableList(row));numbers.add(rowNum);columns=Math.max(columns,count);
+                        if(!compact)appendSummary(row);
+                    }
+                }
+                rowDepth=0;
+            }
+            if(depth==sheetData)sheetData=0;
+        }
+        private String cellValue(){
+            String raw=value.toString();
+            if(raw.isEmpty()&&formula)return "[no saved value]";
+            if("s".equals(type)){
+                int slot=positive(raw,MAX_SHARED,-1);
+                if(slot<0||slot>=shared.size()){doc.limited=true;return "[text outside preview]";}
+                raw=shared.get(slot);
+                if(raw.length()>cellCap){raw=cut(raw,cellCap);doc.limited=true;}
+            }else if("b".equals(type))raw="1".equals(raw)?"TRUE":"0".equals(raw)?"FALSE":raw;
+            return raw;
+        }
+        private void appendSummary(List<String> row){
+            if(summary.length()>0)append(summary,"\n",MAX_OUTPUT);
+            append(summary,Integer.toString(rowNum)+"   ",MAX_OUTPUT);
+            boolean first=true;
+            for(int i=0;i<row.size();i++){
+                String cell=row.get(i);
+                if(cell.isEmpty())continue;
+                if(!first)append(summary,"  │  ",MAX_OUTPUT);
+                append(summary,(char)('A'+i)+" "+cell.replace('\n',' ').replace('\r',' ').replace('\t',' '),MAX_OUTPUT);
+                first=false;
+            }
+        }
+    }
+
     static final class SlidePage {
         final int index,count,width,height,background;
         final List<SlideItem> items;
@@ -793,14 +952,18 @@ final class OfficePreview {
         final boolean sheet;
         final List<Part> parts = new ArrayList<>();
         final Set<String> ids = new HashSet<>();
-        int position;
-        Index(Document d, boolean sheet) {
-            super(d,sheet?"workbook":"presentation",sheet?S:P,sheet?SS:PS); this.sheet = sheet;
+        final int cap;
+        int position,sheetList;
+        Index(Document d, boolean sheet) { this(d,sheet,sheet?MAX_SHEETS:MAX_SLIDES); }
+        Index(Document d, boolean sheet,int cap) {
+            super(d,sheet?"workbook":"presentation",sheet?S:P,sheet?SS:PS); this.sheet = sheet;this.cap=cap;
         }
         @Override void start(String uri, String name, Attributes attrs) {
-            if (depth != 3 || !match(uri,ns1,ns2) || !(sheet ? "sheet" : "sldId").equals(name)) return;
+            if (!match(uri,ns1,ns2)) return;
+            if (sheet&&depth==2&&"sheets".equals(name)){sheetList=depth;return;}
+            if (depth != 3 || sheet&&sheetList==0 || !(sheet ? "sheet" : "sldId").equals(name)) return;
             int order = ++position;
-            if (parts.size() >= (sheet ? MAX_SHEETS : MAX_SLIDES)) { doc.limited = true; return; }
+            if (parts.size() >= cap) { doc.limited = true; return; }
             // Do not expose the contents of hidden worksheets.
             String state = attrs.getValue("state");
             if (sheet && state != null && !"visible".equals(state)) { doc.limited = true; return; }
@@ -812,6 +975,7 @@ final class OfficePreview {
             title = ZipDirectory.safeLabel(cut(title, 100));
             parts.add(new Part(id,title));
         }
+        @Override void end(String uri,String name){if(depth==sheetList)sheetList=0;}
     }
 
     private static final class Relations extends Walker {

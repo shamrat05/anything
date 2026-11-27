@@ -584,6 +584,9 @@ public final class FileViewerActivity extends Activity {
         }else if(kind==Kind.OFFICE&&shown!=null&&shown.slide!=null){
             format.add(new SpotlightTour.Step("Move between slides","The buttons below the slide go to the previous or next slide.",()->formatGuideTarget));
             format.add(new SpotlightTour.Step("Read the slide text","Pinch or double-tap to zoom. Tap Slide text for a selectable text version.",()->viewerGuideControl(previewContent,readerSource?"Slide view":"Slide text")));
+        }else if(shown!=null&&shown.worksheet!=null){
+            format.add(new SpotlightTour.Step("Choose a worksheet","Tap the worksheet name to switch sheets. Scroll across the grid to see additional columns.",()->formatGuideTarget));
+            format.add(new SpotlightTour.Step("Copy saved cell values","Tap Values as text for a selectable view. Formulas are not recalculated.",()->viewerGuideControl(previewContent,readerSource?"Grid":"Values as text")));
         }else if(image!=null){
             format.add(new SpotlightTour.Step("Fit the image","The middle button resets zoom. Use − or +, pinch or double-tap to zoom, then drag to pan.",()->formatGuideTarget));
             if(kind==Kind.SVG)format.add(new SpotlightTour.Step("Read the SVG source","Tap Source below the image to inspect its text. Tap Image to return.",()->viewerGuideControl(previewContent,"Source")));
@@ -793,7 +796,7 @@ public final class FileViewerActivity extends Activity {
             return true;
         }
         private boolean canSwipe(MotionEvent event){return event.getPointerCount()==1&&session!=null&&session.entries.size()>1
-                &&(shown==null||shown.table==null||readerSource)
+                &&(shown==null||shown.table==null&&shown.worksheet==null||readerSource)
                 &&(image==null||image.state()[0]<=1.05f)&&Math.abs(event.getX()-downX)>slop*1.5f
                 &&Math.abs(event.getX()-downX)>Math.abs(event.getY()-downY)*1.35f;}
         private void follow(float distance){
@@ -921,7 +924,11 @@ public final class FileViewerActivity extends Activity {
         if (kind == Kind.IMAGE || kind == Kind.PDF || kind==Kind.SVG&&!readerSource) showImage(result);
         else if (kind==Kind.TEXT&&result.table!=null)showDelimitedTable(result);
         else if (kind == Kind.TEXT || kind==Kind.MARKDOWN || kind==Kind.HTML || kind==Kind.SVG) showDocument(result);
-        else if (kind == Kind.OFFICE) {if(result.slide!=null)showSlides(result.slide);else showOffice(result.office);}
+        else if (kind == Kind.OFFICE) {
+            if(result.slide!=null)showSlides(result.slide);
+            else if(result.worksheet!=null)showWorksheet(result.worksheet);
+            else showOffice(result.office);
+        }
         else if (kind == Kind.ZIP) showArchive(result.archive);
         else if (kind == Kind.STREAM_ARCHIVE) showStreamArchive(StreamArchiveExtraction.format(name),result.tar);
         else if (kind == Kind.SEVEN_Z) showSevenZip(result.sevenZip);
@@ -1081,6 +1088,64 @@ public final class FileViewerActivity extends Activity {
         column.addView(pages,new LinearLayout.LayoutParams(-1,dp(48)));
         formatGuideTarget=pages;
         previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private void showWorksheet(OfficePreview.Worksheet worksheet){
+        page=worksheet.index;pageCount=worksheet.names.size();
+        LinearLayout column=new LinearLayout(this);column.setOrientation(LinearLayout.VERTICAL);
+        Button sheets=button(worksheet.title()+(pageCount>1?"  ▾":""));
+        sheets.setSingleLine(true);sheets.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        sheets.setContentDescription(pageCount>1?"Choose worksheet. "+worksheet.title()+", "+(page+1)+" of "+pageCount:worksheet.title());
+        if(pageCount>1)sheets.setOnClickListener(v->chooseWorksheet(worksheet));
+        column.addView(sheets,new LinearLayout.LayoutParams(-1,dp(48)));
+        formatGuideTarget=sheets;
+
+        FrameLayout frame=new FrameLayout(this);
+        View grid=CsvPreviewGrid.create(this,theme,worksheet,false);
+        frame.addView(grid,new FrameLayout.LayoutParams(-1,-1));
+        TextView values=text(worksheet.summary.isEmpty()?"No cells in this worksheet preview.":worksheet.summary,readerSize,INK);
+        values.setTypeface(android.graphics.Typeface.MONOSPACE);values.setTextIsSelectable(true);
+        values.setPadding(dp(12),dp(10),dp(12),dp(12));simpleTextLayout(values);
+        textScroll=new EdgeFastScroll.Document(this);textScroll.setFillViewport(true);
+        textScroll.addView(values,new ScrollView.LayoutParams(-1,-2));
+        textScroll.addOnLayoutChangeListener(new RestoreScroll(scrollY));
+        frame.addView(textScroll,new FrameLayout.LayoutParams(-1,-1));
+        column.addView(frame,new LinearLayout.LayoutParams(-1,0,1));
+
+        LinearLayout tools=row();tools.setBackgroundColor(CHROME);tools.setGravity(Gravity.CENTER);
+        Button mode=button(""),external=button("Open in another app");
+        external.setOnClickListener(v->openExternal());
+        tools.addView(mode,new LinearLayout.LayoutParams(0,dp(48),1));
+        tools.addView(external,new LinearLayout.LayoutParams(0,dp(48),1));
+        column.addView(tools,new LinearLayout.LayoutParams(-1,-2));
+        Runnable show=()->{
+            grid.setVisibility(readerSource?View.GONE:View.VISIBLE);
+            textScroll.setVisibility(readerSource?View.VISIBLE:View.GONE);
+            mode.setText(readerSource?"Grid":"Values as text");
+        };
+        show.run();mode.setOnClickListener(v->{readerSource=!readerSource;show.run();});
+        details.setText(metadata()+" · Excel workbook · "+pageCount+(pageCount==1?" worksheet":" worksheets"));
+        note((worksheet.limited?"Partial preview. ":"")+"Saved values only. Dates can appear as numbers.");
+        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private void chooseWorksheet(OfficePreview.Worksheet worksheet){
+        if(activeSheet!=null)activeSheet.dismiss();
+        AppSheet sheet=new AppSheet(this,"Worksheets");activeSheet=sheet;
+        for(int i=0;i<worksheet.names.size();i++){
+            int index=i;
+            String title=worksheet.names.get(i);
+            Button choice=button(title+(i==worksheet.index?"  ✓":""));
+            choice.setSingleLine(true);choice.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            choice.setGravity(Gravity.CENTER_VERTICAL|Gravity.START);
+            choice.setContentDescription(title+(i==worksheet.index?", selected":""));
+            choice.setOnClickListener(v->{
+                sheet.dismiss();
+                if(index!=page){scrollY=0;changePage(index);}
+            });
+            sheet.content.addView(choice,new LinearLayout.LayoutParams(-1,dp(48)));
+        }
+        sheet.show();
     }
 
     private void showOffice(OfficePreview.Result office) {
@@ -2869,6 +2934,7 @@ public final class FileViewerActivity extends Activity {
         CsvPreview.Result table;
         boolean tableMalformed;
         PresentationSlide slide;
+        OfficePreview.Worksheet worksheet;
         boolean transportStream;
         ZipDirectory.Listing archive;
         TarArchiveListing.Listing tar;
@@ -2884,7 +2950,7 @@ public final class FileViewerActivity extends Activity {
             if (bitmap != null) { if (!sharedBitmap&&!bitmap.isRecycled()) bitmap.recycle(); bitmap = null; }
             if (media != null) { try { media.close(); } catch (IOException ignored) { } media = null; }
             if (apk != null) { apk.close(); apk = null; }
-            picture=null;formatted=null;text = null;code=null;office=null;table=null;slide=null; archive = null; tar = null; sevenZip = null;
+            picture=null;formatted=null;text = null;code=null;office=null;table=null;slide=null;worksheet=null; archive = null; tar = null; sevenZip = null;
         }
     }
 
@@ -2942,7 +3008,8 @@ public final class FileViewerActivity extends Activity {
                 String cacheKey=result.key+':'+kind+':'+(kind==Kind.PDF?wantedPage:0)+':'+sourceName+':'+language;
                 // API 26 exposes only whole-second metadata. Slides are read lazily; don't retain pages and their images in the general cache.
                 boolean isPresentation=kind==Kind.OFFICE&&OfficePreview.format(sourceName)==OfficePreview.Format.SLIDES;
-                boolean cacheable=preciseMetadata&&kind!=Kind.APK&&kind!=Kind.SEVEN_Z&&!isPresentation;
+                boolean isWorkbook=kind==Kind.OFFICE&&OfficePreview.format(sourceName)==OfficePreview.Format.SHEET;
+                boolean cacheable=preciseMetadata&&kind!=Kind.APK&&kind!=Kind.SEVEN_Z&&!isPresentation&&!isWorkbook;
                 PreviewData existing=cacheable?CACHE.get(cacheKey):null;
                 if(existing!=null){existing.copyTo(result);return result;}
                 if (kind == Kind.IMAGE || kind == Kind.PDF) {
@@ -2965,6 +3032,13 @@ public final class FileViewerActivity extends Activity {
                                 input.getChannel().position(0);
                                 try{result.office=OfficePreview.read(input.getChannel(),OfficePreview.Format.SLIDES);}
                                 catch(IOException noOutline){throw unavailable;}
+                            }
+                        }else if(isWorkbook){
+                            try{result.worksheet=OfficePreview.readWorksheet(input.getChannel(),wantedPage,false);}
+                            catch(IOException unavailable){
+                                checkCancelled();input.getChannel().position(0);
+                                try{result.office=OfficePreview.read(input.getChannel(),OfficePreview.Format.SHEET);}
+                                catch(IOException noSummary){throw unavailable;}
                             }
                         }else result.office=OfficePreview.read(input.getChannel(),OfficePreview.format(sourceName));
                     }
@@ -3092,9 +3166,10 @@ public final class FileViewerActivity extends Activity {
     }
 
     // Inline previews use the same no-follow source and decoders, with smaller rendered images.
-    enum QuickKind { IMAGE, PDF, TEXT, TABLE, AUDIO, VIDEO, UNSUPPORTED }
+    enum QuickKind { IMAGE, PDF, TEXT, TABLE, WORKSHEET, AUDIO, VIDEO, UNSUPPORTED }
     static QuickKind quickKind(String name) {
         if(CsvPreview.format(name)!=null)return QuickKind.TABLE;
+        if(OfficePreview.format(name)==OfficePreview.Format.SHEET)return QuickKind.WORKSHEET;
         switch (kindFor(name,mimeFor(name))) {
             case IMAGE: return QuickKind.IMAGE;
             case PDF: return QuickKind.PDF;
@@ -3144,6 +3219,15 @@ public final class FileViewerActivity extends Activity {
                 }
             }
             String identity=RootFileProvider.identity(Os.fstat(file.getFileDescriptor()));
+            if(format==QuickKind.WORKSHEET){
+                try(ParcelFileDescriptor.AutoCloseInputStream input=
+                            new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) {
+                    OfficePreview.Worksheet worksheet=OfficePreview.readWorksheet(input.getChannel(),0,true);
+                    if(!identity.equals(RootFileProvider.identity(Os.fstat(file.getFileDescriptor()))))
+                        throw new IOException("The file changed. Reopen it to preview.");
+                    return worksheet;
+                }
+            }
             try(PreviewResult result=new PreviewResult()) {
                 if(format==QuickKind.PDF) renderPdfPage(file,result,0,960);
                 else if(format==QuickKind.IMAGE) {

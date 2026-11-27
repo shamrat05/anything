@@ -105,7 +105,8 @@ final class QuickPreviewCard extends LinearLayout implements AutoCloseable {
         area=new FrameLayout(context);
         area.setBackground(AppSheet.shape(theme.surface,dp(12)));
         area.setClipToOutline(true);
-        boolean text=format==FileViewerActivity.QuickKind.TEXT||format==FileViewerActivity.QuickKind.TABLE;
+        boolean text=format==FileViewerActivity.QuickKind.TEXT||format==FileViewerActivity.QuickKind.TABLE
+                ||format==FileViewerActivity.QuickKind.WORKSHEET;
         document.addView(area,new LayoutParams(-1,text||format==FileViewerActivity.QuickKind.UNSUPPORTED?-2:previewHeight));
         status=label("",14,theme.muted);
         status.setTextIsSelectable(text);
@@ -236,16 +237,27 @@ final class QuickPreviewCard extends LinearLayout implements AutoCloseable {
             image.setContentDescription(format==FileViewerActivity.QuickKind.PDF?"First page":"Image preview");
             area.addView(image,new FrameLayout.LayoutParams(-1,-1));
             image.setImage(pixels.bitmap,pixels.orientation);
-        } else if(result instanceof CsvPreview.Result){
-            CsvPreview.Result model=(CsvPreview.Result)result;
+        } else if(result instanceof CsvPreview.Result||result instanceof OfficePreview.Worksheet){
             area.removeView(status);
             LinearLayout table=new LinearLayout(getContext());table.setOrientation(VERTICAL);
-            tableGrid=CsvPreviewGrid.create(getContext(),theme,model,true);
+            String limits;
+            if(result instanceof OfficePreview.Worksheet){
+                OfficePreview.Worksheet worksheet=(OfficePreview.Worksheet)result;
+                TextView sheet=label(worksheet.title(),13,theme.ink);
+                sheet.setPadding(dp(8),dp(6),dp(8),dp(6));table.addView(sheet,new LayoutParams(-1,-2));
+                tableGrid=CsvPreviewGrid.create(getContext(),theme,worksheet,true);
+                limits=(worksheet.limited?"Partial preview. ":"")+"Saved values only."
+                        +(worksheet.names.size()>1?" Use Open to see other worksheets.":"");
+            }else{
+                CsvPreview.Result model=(CsvPreview.Result)result;
+                tableGrid=CsvPreviewGrid.create(getContext(),theme,model,true);
+                limits=model.limited?"Partial table. Use Open for more rows and columns.":"";
+            }
             table.addView(tableGrid,new LayoutParams(-1,-2));
-            if(model.limited){
-                TextView limits=label("Partial table. Use Open for more rows and columns.",12,theme.muted);
-                limits.setPadding(dp(8),dp(6),dp(8),dp(6));
-                table.addView(limits,new LayoutParams(-1,-2));
+            if(!limits.isEmpty()){
+                TextView caption=label(limits,12,theme.muted);
+                caption.setPadding(dp(8),dp(6),dp(8),dp(6));
+                table.addView(caption,new LayoutParams(-1,-2));
             }
             area.addView(table,new FrameLayout.LayoutParams(-1,-2));
         } else if(result instanceof String) {
