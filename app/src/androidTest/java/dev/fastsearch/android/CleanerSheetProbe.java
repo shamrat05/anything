@@ -188,9 +188,14 @@ public final class CleanerSheetProbe extends Instrumentation {
             shown.get().show();
             check(button(shown.get().actions,"Scan storage").isEnabled()&&scans.get()==0,
                     "storage scan is available without a folder and opening doesn’t scan");
-            check(find(shown.get().content,"Choose a folder (optional)")!=null,"folder choice is optional");
-            check(find(shown.get().content,"Scanning never changes your files. Cleanup is separate and asks first.")!=null,
-                    "read-only intent is visible");
+            View scopeControl=byDescription(shown.get().content,"Choose storage or folder");
+            check(scopeControl instanceof Button&&scopeControl.isShown()&&scopeControl.isEnabled()
+                    &&scopeControl.isClickable()&&get(panel.get(),"scope")==null
+                    &&((TextView)get(panel.get(),"scopeLabel")).getText().toString().contains("All accessible shared storage"),
+                    "enabled Scope picker is optional for the default all-storage scan");
+            TextView readiness=(TextView)get(panel.get(),"status");
+            check(readiness.isShown()&&readiness.getText().toString().contains("No files are changed"),
+                    "the compact ready status describes the scan as non-mutating");
             check(!CleanerSheet.allowedScope(Collections.singleton(volume),volume+"9/Download")
                     &&!CleanerSheet.allowedScope(Collections.singleton(volume),volume+"/Android/data"),
                     "lookalike and private folder rejected");

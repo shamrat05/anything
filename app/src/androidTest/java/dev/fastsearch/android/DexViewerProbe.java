@@ -5,7 +5,6 @@ import android.app.AlertDialog;
 import android.app.Instrumentation;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.system.Os;
@@ -19,15 +18,20 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.ListView;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import dev.fastsearch.core.FileEntry;
@@ -142,6 +146,7 @@ public final class DexViewerProbe extends Instrumentation {
             await(inspector,"dev.anything.fixture.Alpha");
             runOnMainSync(() -> { inspector.finish(); viewer.finish(); });
             multiScope(target,apk);
+            crossDexReferences(target,directory);
             passed = true;
         } catch (Throwable failure) {
             java.io.StringWriter trace = new java.io.StringWriter();
@@ -191,12 +196,31 @@ public final class DexViewerProbe extends Instrumentation {
         check(Intent.ACTION_CREATE_DOCUMENT.equals(validate.getAction()) && validate.getComponent()!=null
                 && validate.getBooleanExtra(Intent.EXTRA_LOCAL_ONLY,false)
                 && "Alpha.smali".equals(validate.getStringExtra(Intent.EXTRA_TITLE)), "Create a new local .smali document");
-        IntentFilter filter=new IntentFilter(Intent.ACTION_CREATE_DOCUMENT);
-        ActivityMonitor monitor=addMonitor(filter,new ActivityResult(Activity.RESULT_CANCELED,null),true);
-        runOnMainSync(() -> described(activity.getWindow().getDecorView(),"Save Smali as").performClick());
-        check(checkMonitorHit(monitor,1),"Save launches local picker, not a direct write");
-        waitForIdleSync();
-        runOnMainSync(() -> check(described(activity.getWindow().getDecorView(),"Save Smali as").isEnabled(),"Cancel clears picker lock without writing"));
+        AtomicReference<Intent> launch=new AtomicReference<>();
+        AtomicBoolean locked=new AtomicBoolean();
+        ActivityMonitor monitor=new ActivityMonitor() {
+            @Override public ActivityResult onStartActivity(Intent intent) {
+                if(!Intent.ACTION_CREATE_DOCUMENT.equals(intent.getAction()))return null;
+                launch.set(new Intent(intent));
+                locked.set(!described(activity.getWindow().getDecorView(),"Save Smali as").isEnabled());
+                return new ActivityResult(Activity.RESULT_CANCELED,null);
+            }
+        };
+        addMonitor(monitor);
+        try {
+            runOnMainSync(() -> described(activity.getWindow().getDecorView(),"Save Smali as").performClick());
+            Intent intent=launch.get();
+            check(intent!=null && locked.get(),"Save launches local picker, not a direct write");
+            check(validate.getComponent().equals(intent.getComponent())
+                    && "application/octet-stream".equals(intent.getType())
+                    && intent.hasCategory(Intent.CATEGORY_OPENABLE)
+                    && intent.getBooleanExtra(Intent.EXTRA_LOCAL_ONLY,false)
+                    && "Alpha.smali".equals(intent.getStringExtra(Intent.EXTRA_TITLE))
+                    && intent.getData()==null && intent.getClipData()==null,
+                    "Actual launch targets system Files with local-only metadata and no source URI");
+            awaitMain(()->described(activity.getWindow().getDecorView(),"Save Smali as").isEnabled(),
+                    "Cancel clears picker lock without writing");
+        } finally { removeMonitor(monitor); }
     }
 
     private void multiScope(Context target,File apk) throws Exception {
@@ -217,6 +241,134 @@ public final class DexViewerProbe extends Instrumentation {
         pickDex(inspector,0,"All DEX files");
         await(inspector,"dev.anything.fixture.Beta");
         runOnMainSync(inspector::finish);
+    }
+
+    private void crossDexReferences(Context target,File directory) throws Exception {
+        String packageName="dev.anything.dexfixture.";
+        String descriptor="Ldev/anything/dexfixture/NavigatorTarget;";
+        File apk=new File(directory,"reference-navigation.apk");
+        try(ZipOutputStream zip=new ZipOutputStream(Files.newOutputStream(apk.toPath()))) {
+            dexFixture(zip,"classes.dex","origin");
+            dexFixture(zip,"classes2.dex","target");
+            dexFixture(zip,"classes3.dex","target");
+        }
+        byte[] original=Files.readAllBytes(apk.toPath());
+        try(FileChannel file=FileChannel.open(apk.toPath(),StandardOpenOption.READ)) {
+            DexInspector.Index index=DexInspector.index(file,true,DexInspector.MAX_ALL_BYTES);
+            check(index.items.size()==3 && index.targets(descriptor).size()==2,"Two duplicate owners across DEX entries");
+            check(index.exact(descriptor,"classes.dex")==null && index.exact(descriptor,"classes2.dex")!=null,
+                    "Exact owner lookup is scoped to the chosen DEX");
+            check(index.targets("Ljava/lang/Object;").isEmpty(),"External owner is absent from the inspected APK");
+            String source=DexInspector.smali(index.exact("Ldev/anything/dexfixture/NavigatorOrigin;","classes.dex"));
+            String dest=DexInspector.smali(index.exact(descriptor,"classes2.dex"));
+            for(String member:new String[]{"picked(I)I","number:I"}) {
+                SmaliReferences.Ref link=SmaliReferences.scan(source).stream()
+                        .filter(ref->ref.label().equals(descriptor+"->"+member)).findFirst().orElseThrow(AssertionError::new);
+                SmaliReferences.Anchor anchor=SmaliReferences.declaration(dest,link);
+                check(anchor!=null && dest.substring(anchor.start,anchor.end).equals(member),"Exact Baksmali member "+member);
+            }
+        }
+        String identity;
+        try(ParcelFileDescriptor fd=ParcelFileDescriptor.open(apk,ParcelFileDescriptor.MODE_READ_ONLY)) {
+            identity=RootFileProvider.identity(Os.fstat(fd.getFileDescriptor()));
+        }
+        FileEntry entry=new FileEntry(apk.getCanonicalPath(),false,apk.length(),apk.lastModified());
+        Activity activity=startActivitySync(DexViewerActivity.intent(target,RootFileProvider.issue(target,entry,false),
+                apk.getName(),apk.getCanonicalPath(),identity,false,true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        View window=activity.getWindow().getDecorView();
+        try {
+            await(activity,"3 classes");
+            await(activity,packageName+"NavigatorOrigin");
+            runOnMainSync(()->{
+                ListView list=type(window,ListView.class);
+                check(list.performItemClick(list.getChildAt(0),0,0),"Open origin from the visible class list");
+            });
+            await(activity,"linked(I)I");
+            AtomicInteger originalY=new AtomicInteger();
+            awaitMain(()->{
+                SmaliCodePane pane=type(window,SmaliCodePane.class);
+                if(pane==null)return false;
+                ScrollView scroll=type(pane,ScrollView.class);
+                if(scroll==null || scroll.getHeight()==0)return false;
+                scroll.scrollTo(0,380);
+                originalY.set(scroll.getScrollY());
+                return originalY.get()>0;
+            },"Synthetic origin has real scroll position");
+            runOnMainSync(()->described(window,"Open Smali references").performClick());
+            pickReference(activity,descriptor+"->picked(I)I");
+            pickReference(activity,"classes2.dex");
+            await(activity,packageName+"NavigatorTarget · classes2.dex");
+            await(activity,"picked(I)I");
+            checkHighlight(window,"picked(I)I");
+            runOnMainSync(activity::onBackPressed);
+            await(activity,packageName+"NavigatorOrigin · classes.dex");
+            await(activity,"linked(I)I");
+            awaitMain(()->{
+                SmaliCodePane pane=type(window,SmaliCodePane.class);
+                return pane!=null && type(pane,ScrollView.class).getScrollY()==originalY.get();
+            },"Back restores the original vertical reading position");
+            runOnMainSync(()->described(window,"Open Smali references").performClick());
+            pickReference(activity,descriptor+"->number:I");
+            pickReference(activity,"classes3.dex");
+            await(activity,packageName+"NavigatorTarget · classes3.dex");
+            await(activity,".field public static number:I");
+            checkHighlight(window,"number:I");
+            runOnMainSync(activity::onBackPressed);
+            await(activity,"linked(I)I");
+            runOnMainSync(()->described(window,"Open Smali references").performClick());
+            pickReference(activity,"Ljava/lang/Object;");
+            await(activity,packageName+"NavigatorOrigin · classes.dex");
+            await(activity,"linked(I)I");
+            runOnMainSync(activity::onBackPressed);
+            await(activity,"3 classes");
+            check(java.util.Arrays.equals(original,Files.readAllBytes(apk.toPath())),"Reference navigation did not alter the selected APK");
+        } finally { runOnMainSync(activity::finish); }
+    }
+
+    private void dexFixture(ZipOutputStream zip,String member,String fixture) throws IOException {
+        try(InputStream input=getContext().getAssets().open("dex-reference/"+fixture+".dex")) {
+            zip.putNextEntry(new ZipEntry(member));
+            byte[] buffer=new byte[4096];
+            int n;
+            while((n=input.read(buffer))!=-1)zip.write(buffer,0,n);
+            zip.closeEntry();
+        }
+    }
+
+    private void pickReference(Activity activity,String label) {
+        awaitMain(()->{
+            try {
+                java.lang.reflect.Field field=DexViewerActivity.class.getDeclaredField("referenceDialog");
+                field.setAccessible(true);
+                AlertDialog dialog=(AlertDialog)field.get(activity);
+                if(dialog==null || !dialog.isShowing() || dialog.getListView()==null)return false;
+                ListView list=dialog.getListView();
+                for(int i=0;i<list.getCount();i++)if(label.equals(list.getItemAtPosition(i)))
+                    return list.performItemClick(list.getChildAt(i-list.getFirstVisiblePosition()),i,i);
+                return false;
+            } catch(ReflectiveOperationException failure){throw new AssertionError(failure);}
+        },"Choose "+label);
+    }
+
+    private void checkHighlight(View window,String signature) {
+        runOnMainSync(()->{
+            TextView code=find(window,signature);
+            Spanned buffer=(Spanned)code.getText();
+            BackgroundColorSpan[] spans=buffer.getSpans(0,buffer.length(),BackgroundColorSpan.class);
+            check(spans.length==1 && signature.contentEquals(buffer.subSequence(buffer.getSpanStart(spans[0]),
+                    buffer.getSpanEnd(spans[0]))),"Highlighted exact declaration "+signature);
+        });
+    }
+
+    private void awaitMain(BooleanSupplier condition,String description) {
+        long end=SystemClock.uptimeMillis()+15_000;
+        AtomicBoolean passed=new AtomicBoolean();
+        while(SystemClock.uptimeMillis()<end) {
+            runOnMainSync(()->passed.set(condition.getAsBoolean()));
+            if(passed.get()){check(true,description);return;}
+            SystemClock.sleep(50);
+        }
+        throw new AssertionError("Missing: "+description);
     }
 
     private void pickDex(Activity activity,int index,String expected) {
