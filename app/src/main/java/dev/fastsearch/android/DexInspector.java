@@ -15,7 +15,9 @@ import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.List;
 import java.util.Locale;
 import java.util.zip.CRC32;
@@ -30,11 +32,11 @@ final class DexInspector {
     private static final long MAX_APK_BYTES = 768L * 1024 * 1024;
 
     static final class Item {
-        final String name, match, dex;
+        final String name, match, dex, descriptor;
         private final ClassDef definition;
-        Item(String name, String dex, ClassDef definition) {
+        Item(String name, String dex, String descriptor, ClassDef definition) {
             this.name = name; this.match = name.toLowerCase(Locale.ROOT);
-            this.dex = dex; this.definition = definition;
+            this.dex = dex; this.descriptor=descriptor; this.definition = definition;
         }
         String key() { return dex + "/" + name; }
     }
@@ -42,9 +44,21 @@ final class DexInspector {
     static final class Index {
         final List<Item> items;
         final List<String> entries;
+        private final Map<String,List<Item>> byOwner;
         Index(List<Item> items,List<String> entries) {
             this.items=Collections.unmodifiableList(items);
             this.entries=Collections.unmodifiableList(entries);
+            Map<String,List<Item>> owners=new HashMap<>();
+            for(Item item:items)owners.computeIfAbsent(item.descriptor,ignored->new ArrayList<>(1)).add(item);
+            byOwner=owners;
+        }
+        List<Item> targets(String owner) {
+            List<Item> rows=byOwner.get(owner);
+            return rows==null?Collections.emptyList():Collections.unmodifiableList(rows);
+        }
+        Item exact(String owner,String dex) {
+            for(Item item:targets(owner))if(item.dex.equals(dex))return item;
+            return null;
         }
     }
 
@@ -128,7 +142,7 @@ final class DexInspector {
                 }
                 nameBudget -= type.length();
                 if (nameBudget < 0) throw new IOException("Class names exceed the safe inspection limit.");
-                out.add(new Item(type.substring(1, type.length() - 1).replace('/', '.'), dex, item));
+                out.add(new Item(type.substring(1, type.length() - 1).replace('/', '.'), dex, type, item));
             }
         } catch (RuntimeException malformed) { throw invalid(); }
         return nameBudget;

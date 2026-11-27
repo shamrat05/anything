@@ -62,6 +62,8 @@ java -cp app/build/preview-test-classes dev.fastsearch.android.CleanerScopedWalk
 
 javac --release 8 -Xlint:all,-options -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/SmaliFind.java app/src/test/java/dev/fastsearch/android/SmaliFindTest.java
 java -cp app/build/preview-test-classes dev.fastsearch.android.SmaliFindTest
+javac --release 8 -Xlint:all,-options -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/SmaliReferences.java app/src/test/java/dev/fastsearch/android/SmaliReferencesTest.java
+java -cp app/build/preview-test-classes dev.fastsearch.android.SmaliReferencesTest
 
 javac --release 8 -Xlint:all,-options -cp app/build/preview-test-classes -d app/build/preview-test-classes app/src/main/java/dev/fastsearch/android/ApkInspectionFacts.java app/src/test/java/dev/fastsearch/android/ApkInspectionFactsTest.java
 java -cp app/build/preview-test-classes dev.fastsearch.android.ApkInspectionFactsTest

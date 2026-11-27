@@ -106,7 +106,11 @@ Thumbnail work follows visible cells. Requests are deduplicated and obsolete que
 
 Open a standalone `.dex` or an APK, then choose **Browse DEX classes**. Search by
 class name, package or DEX entry and tap a result to read its Smali. Inside a class,
-**Find** highlights literal matches and the arrows move between them. Nothing is
+**Find** highlights literal matches. Tap an underlined reference or open **Refs**
+to follow references within the opened APK or DEX. Exact methods and fields
+jump to their declarations. When more than one other DEX contains the class,
+choose which one to open. Back restores the previous reading position. External
+classes are not opened. Nothing is
 run, modified or installed. This is bytecode disassembly, not Java decompilation.
 The browser supports standard DEX versions 035–040 and root multi-DEX entries
 (`classes.dex`, `classes2.dex`, etc.) within configured device and file limits.

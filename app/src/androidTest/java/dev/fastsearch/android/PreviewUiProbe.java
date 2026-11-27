@@ -1090,8 +1090,6 @@ public final class PreviewUiProbe extends Instrumentation {
         String storage="http://schemas.openxmlformats.org/spreadsheetml/2006/main";
         String relation="http://schemas.openxmlformats.org/officeDocument/2006/relationships";
         String packageNs="http://schemas.openxmlformats.org/package/2006/relationships";
-        String slides="http://schemas.openxmlformats.org/presentationml/2006/main";
-        String drawing="http://schemas.openxmlformats.org/drawingml/2006/main";
         File workbook=new File(fixture,"field-workbook.xlsx");
         officeFixture(workbook,
             "xl/workbook.xml","<workbook xmlns='"+storage+"' xmlns:r='"+relation+"'><sheets><sheet name='Field test' r:id='s'/></sheets></workbook>",
@@ -1106,19 +1104,112 @@ public final class PreviewUiProbe extends Instrumentation {
             check(ExternalFileActions.mimeFor(workbook.getName()).equals(OfficePreview.mime(data.format)),"XLSX handler MIME");
         });
         close(sheet);
+        visualPresentation();
+    }
+
+    private void visualPresentation()throws Exception{
         File presentation=new File(fixture,"field-brief.pptx");
-        officeFixture(presentation,
-            "ppt/presentation.xml","<p:presentation xmlns:p='"+slides+"' xmlns:r='"+relation+"'><p:sldIdLst><p:sldId id='10' r:id='slide'/></p:sldIdLst></p:presentation>",
-            "ppt/_rels/presentation.xml.rels","<Relationships xmlns='"+packageNs+"'><Relationship Id='slide' Type='"+relation+"/slide' Target='slides/slide9.xml'/></Relationships>",
-            "ppt/slides/slide9.xml","<p:sld xmlns:p='"+slides+"' xmlns:a='"+drawing+"'><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Next steps</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>");
-        FileViewerActivity slide=open(issue(presentation),presentation.getName());
+        byte[] packageBytes=slideFixture();
+        java.nio.file.Files.write(presentation.toPath(),packageBytes);
+        FileViewerActivity viewer=open(issue(presentation),presentation.getName());
+        await(()->visibleSlide(viewer,0,"Next steps"),12_000,"first visual slide follows the presentation order");
         main(()->{
-            OfficePreview.Result data=(OfficePreview.Result)field(field(slide,"shown"),"office");
-            check(data.sections.size()==1&&data.sections.get(0).title.equals("Slide 1")
-                    &&data.sections.get(0).text.equals("Next steps"),"PPTX follows presentation order and displays slide text");
-            check(ExternalFileActions.mimeFor(presentation.getName()).equals(OfficePreview.mime(data.format)),"PPTX handler MIME");
+            PresentationSlide slide=(PresentationSlide)field(field(viewer,"shown"),"slide");
+            check(slide.picture.getWidth()>slide.picture.getHeight()&&slide.count==2,"native wide slide canvas and count");
+            android.graphics.Bitmap sample=android.graphics.Bitmap.createBitmap(160,90,android.graphics.Bitmap.Config.ARGB_8888);
+            try{
+                android.graphics.Canvas draw=new android.graphics.Canvas(sample);
+                draw.scale(160f/slide.picture.getWidth(),90f/slide.picture.getHeight());
+                draw.drawPicture(slide.picture);
+                check(sample.getPixel(2,2)==0xffe9f2fa,"slide background draws at expected location");
+                check(sample.getPixel(88,40)==0xff394d80,"shape fill renders on the slide canvas");
+                check(sample.getPixel(132,17)==0xffc03edd,"embedded image renders without external access");
+            }finally{sample.recycle();}
+            ZoomPreviewView zoom=find(content(viewer),ZoomPreviewView.class);
+            check(zoom!=null&&zoom.isShown(),"visual default is the zoomable slide");
+            zoom.zoomBy(2);check(zoom.state()[0]>1.5f,"slide supports zoom and pan");
+            Button toggle=button(content(viewer),"Slide text");check(toggle!=null&&toggle.performClick(),"slide has selectable text fallback");
+            TextView selected=visibleTextView(content(viewer),"Next steps");
+            check(selected!=null&&selected.isTextSelectable(),"slide text is real selectable text");
+            Button visual=button(content(viewer),"Slide view");check(visual!=null&&visual.performClick(),"return to slide view without rerender");
+            Button next=button(content(viewer),"Next slide");check(next!=null&&next.isEnabled()&&next.performClick(),"go to slide 2");
         });
-        close(slide);
+        await(()->visibleSlide(viewer,1,"Second slide"),12_000,"next slide is loaded lazily");
+        main(()->{
+            Button previous=button(content(viewer),"Previous slide");check(previous!=null&&previous.isEnabled()&&previous.performClick(),"return to slide 1");
+        });
+        await(()->visibleSlide(viewer,0,"Next steps"),12_000,"previous slide keeps presentation order");
+        check(ExternalFileActions.mimeFor(presentation.getName()).equals(OfficePreview.mime(OfficePreview.Format.SLIDES)),"PPTX handler MIME");
+        close(viewer);
+
+        File zipped=new File(fixture,"owned-slides.zip");
+        java.nio.file.Files.write(zipped.toPath(),archiveFixture(java.util.Collections.singletonMap("inside.pptx",packageBytes)));
+        FileViewerActivity outer=open(issue(zipped),zipped.getName());
+        FileViewerActivity member=openNestedEntry(outer,"inside.pptx");
+        Uri entry=member.getIntent().getData();
+        await(()->visibleSlide(member,0,"Next steps"),12_000,"verified archive PPTX uses the same visual slide viewer");
+        check(ArchivePreviewSources.depth(entry)==1,"archived slide uses isolated seekable descriptor");
+        close(member);
+        check(!sourceStillOpen(entry),"closing slide viewer releases archive member");
+        close(outer);
+    }
+
+    private boolean visibleSlide(FileViewerActivity viewer,int index,String text)throws Exception{
+        AtomicBoolean ready=new AtomicBoolean();
+        main(()->{
+            Object shown=field(viewer,"shown");
+            if(shown==null)return;
+            PresentationSlide slide=(PresentationSlide)field(shown,"slide");
+            ready.set(slide!=null&&slide.index==index&&slide.text.equals(text));
+        });
+        return ready.get();
+    }
+
+    private static TextView visibleTextView(View root,String expected){
+        if(!root.isShown())return null;
+        if(root instanceof TextView&&expected.contentEquals(((TextView)root).getText()))return (TextView)root;
+        if(root instanceof ViewGroup)for(int i=0;i<((ViewGroup)root).getChildCount();i++){
+            TextView found=visibleTextView(((ViewGroup)root).getChildAt(i),expected);
+            if(found!=null)return found;
+        }
+        return null;
+    }
+
+    private static byte[] slideFixture()throws IOException{
+        String slides="http://schemas.openxmlformats.org/presentationml/2006/main";
+        String drawing="http://schemas.openxmlformats.org/drawingml/2006/main";
+        String relation="http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        String packageNs="http://schemas.openxmlformats.org/package/2006/relationships";
+        String deck="<p:presentation xmlns:p='"+slides+"' xmlns:r='"+relation+"'><p:sldIdLst>"
+                +"<p:sldId id='10' r:id='first'/><p:sldId id='11' r:id='second'/></p:sldIdLst>"
+                +"<p:sldSz cx='10000000' cy='5625000'/></p:presentation>";
+        String rel="<Relationships xmlns='"+packageNs+"'><Relationship Id='first' Type='"+relation
+                +"/slide' Target='slides/slide9.xml'/><Relationship Id='second' Type='"+relation
+                +"/slide' Target='slides/slide1.xml'/></Relationships>";
+        String header="<p:sld xmlns:p='"+slides+"' xmlns:a='"+drawing+"' xmlns:r='"+relation+"'><p:cSld>";
+        String bg="<p:bg><p:bgPr><a:solidFill><a:srgbClr val='E9F2FA'/></a:solidFill></p:bgPr></p:bg>";
+        String shape="<p:sp><p:spPr><a:xfrm><a:off x='1000000' y='1000000'/><a:ext cx='6000000' cy='2000000'/>"
+                +"</a:xfrm><a:prstGeom prst='rect'/><a:solidFill><a:srgbClr val='394D80'/></a:solidFill></p:spPr>"
+                +"<p:txBody><a:p><a:r><a:rPr sz='3000'><a:solidFill><a:srgbClr val='FFFFFF'/></a:solidFill></a:rPr><a:t>";
+        String pic="<p:pic><p:blipFill><a:blip r:embed='pic'/></p:blipFill><p:spPr><a:xfrm>"
+                +"<a:off x='7200000' y='600000'/><a:ext cx='2200000' cy='1600000'/></a:xfrm></p:spPr></p:pic>";
+        String textEnd="</a:t></a:r></a:p></p:txBody></p:sp>";
+        String end="</p:spTree></p:cSld></p:sld>";
+        String picRel="<Relationships xmlns='"+packageNs+"'><Relationship Id='pic' Type='"+relation
+                +"/image' Target='../media/owned.png'/></Relationships>";
+        java.util.Map<String,byte[]> data=new java.util.LinkedHashMap<>();
+        java.nio.charset.Charset utf8=java.nio.charset.StandardCharsets.UTF_8;
+        data.put("ppt/presentation.xml",deck.getBytes(utf8));data.put("ppt/_rels/presentation.xml.rels",rel.getBytes(utf8));
+        data.put("ppt/slides/slide9.xml",(header+bg+"<p:spTree>"+shape+"Next steps"+textEnd+pic+end).getBytes(utf8));
+        data.put("ppt/slides/slide1.xml",(header+bg+"<p:spTree>"+shape+"Second slide"+textEnd+end).getBytes(utf8));
+        data.put("ppt/slides/_rels/slide9.xml.rels",picRel.getBytes(utf8));
+        android.graphics.Bitmap bitmap=android.graphics.Bitmap.createBitmap(32,32,android.graphics.Bitmap.Config.ARGB_8888);
+        java.io.ByteArrayOutputStream png=new java.io.ByteArrayOutputStream();
+        try{bitmap.eraseColor(0xffc03edd);if(!bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,png))
+                throw new IOException("Test bitmap couldn't be encoded.");}
+        finally{bitmap.recycle();}
+        data.put("ppt/media/owned.png",png.toByteArray());
+        return archiveFixture(data);
     }
 
     private static void officeFixture(File file,String... entries)throws IOException {

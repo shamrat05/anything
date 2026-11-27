@@ -25,7 +25,7 @@ public final class OfficePreviewTest {
         check(OfficePreview.format("letter.DOCX")==OfficePreview.Format.WORD,"DOCX case independent");
         check(OfficePreview.format("macro.docm")==null&&OfficePreview.format("early.xls")==null,"legacy and macro formats aren't interpreted");
         check(OfficePreview.mime(OfficePreview.Format.SHEET).endsWith("spreadsheetml.sheet"),"keep true spreadsheet MIME");
-        word(); sheets(); slides(); limits();
+        word(); sheets(); slides(); slidePages(); limits();
         System.out.println("PASS "+checks+" read-only Office checks.");
     }
 
@@ -75,6 +75,69 @@ public final class OfficePreviewTest {
         check(!result.limited&&result.sections.size()==2,"two slides");
         check(result.sections.get(0).title.equals("Slide 1")&&result.sections.get(0).text.equals("First\nStatus summary")
                 &&result.sections.get(1).text.equals("Second\nNext steps"),"presentation order instead of ZIP order");
+    }
+
+    private static void slidePages() throws IOException {
+        Map<String,byte[]> parts=entries("ppt/presentation.xml","<p:presentation xmlns:p=\""+P+"\" xmlns:r=\""+R+"\">"
+                +"<p:sldIdLst><p:sldId r:id=\"mine\"/><p:sldId r:id=\"bad\"/></p:sldIdLst>"
+                +"<p:sldSz cx=\"9000000\" cy=\"4000000\"/></p:presentation>");
+        parts.putAll(entries("ppt/_rels/presentation.xml.rels",rels(
+                rel("mine","slide","./slides/slide1.xml","")+rel("bad","slide","/ppt/slides/slide2.xml",""))));
+        String picture="<p:pic><p:blipFill><a:blip r:embed=\"asset\"/></p:blipFill><p:spPr>"
+                +"<a:xfrm><a:off x=\"20\" y=\"30\"/><a:ext cx=\"400000\" cy=\"500000\"/></a:xfrm></p:spPr></p:pic>";
+        String imageOnly="<p:sld xmlns:p=\""+P+"\" xmlns:a=\""+A+"\" xmlns:r=\""+R+"\"><p:cSld><p:spTree>"
+                +picture+"</p:spTree></p:cSld></p:sld>";
+        parts.putAll(entries("ppt/slides/slide1.xml",imageOnly));
+        parts.putAll(entries("ppt/slides/slide2.xml","<!DOCTYPE sld><sld/>"));
+        parts.putAll(entries("ppt/slides/_rels/slide1.xml.rels",rels(rel("asset","image","../media/fake.png",""))));
+        byte[] pngMagic={(byte)0x89,'P','N','G',13,10,26,10};
+        parts.put("ppt/media/fake.png",pngMagic);
+        OfficePreview.SlidePage imagePage=page(parts,0);
+        check(imagePage.count==2&&imagePage.width==9_000_000&&imagePage.height==4_000_000,
+                "image-only deck reads only selected page, not next corrupt part");
+        check(imagePage.items.size()==1&&imagePage.items.get(0).image.length==pngMagic.length
+                &&imagePage.items.get(0).x==20&&imagePage.text.isEmpty(),"image-only slide exposes bounded PNG");
+        try{page(parts,1);throw new AssertionError("unsafe DTD accepted");}catch(IOException expected){checks++;}
+        parts.putAll(entries("ppt/slides/_rels/slide1.xml.rels",rels(rel("asset","image","https://example.invalid/out.png","External"))));
+        OfficePreview.SlidePage external=page(parts,0);
+        check(external.items.isEmpty()&&external.limited,"external image ignored");
+        parts.putAll(entries("ppt/slides/_rels/slide1.xml.rels",rels(rel("asset","image","../../ppt/media/fake.png",""))));
+        check(page(parts,0).items.isEmpty(),"part relationship never leaves ppt root");
+        parts.putAll(entries("ppt/slides/_rels/slide1.xml.rels",rels(rel("asset","image","../media/%66ake.png",""))));
+        check(page(parts,0).items.isEmpty(),"ambiguous percent-encoded paths rejected");
+        parts.putAll(entries("ppt/slides/_rels/slide1.xml.rels",rels(rel("asset","image","../media/fake.png","")
+                +rel("asset","image","/ppt/media/fake.png",""))));
+        check(page(parts,0).items.isEmpty(),"ambiguous duplicate image reference not followed");
+        parts.putAll(entries("ppt/slides/_rels/slide1.xml.rels",rels(rel("asset","image","../media/fake.png",""))));
+        parts.put("ppt/media/fake.png",new byte[2*1024*1024+1]);
+        check(page(parts,0).items.isEmpty(),"over-budget embedded image ignored");
+        parts.putAll(entries("ppt/slides/slide1.xml","<p:sld xmlns:p=\""+P+"\" xmlns:a=\""+A+"\"><p:cSld><p:bg><p:bgPr>"
+                +"<a:solidFill><a:srgbClr val=\"F4F6FB\"/></a:solidFill></p:bgPr></p:bg><p:spTree><p:sp>"
+                +"<p:spPr><a:xfrm><a:off x=\"685800\" y=\"5029200\"/><a:ext cx=\"5029200\" cy=\"457200\"/></a:xfrm>"
+                +"<a:prstGeom prst=\"roundRect\"/><a:solidFill><a:schemeClr val=\"accent2\"/></a:solidFill></p:spPr>"
+                +"<p:txBody><a:bodyPr anchor=\"ctr\"/><a:p><a:pPr algn=\"ctr\"/><a:r>"
+                +"<a:rPr sz=\"2000\" b=\"1\"><a:solidFill><a:srgbClr val=\"29425C\"/></a:solidFill></a:rPr>"
+                +"<a:t>Coordinate check: Team A</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"));
+        parts.putAll(entries("ppt/slides/_rels/slide1.xml.rels",rels(rel("layout","slideLayout","../slideLayouts/slideLayout1.xml",""))));
+        parts.putAll(entries("ppt/slideLayouts/slideLayout1.xml","<p:sldLayout xmlns:p=\""+P+"\"/>"));
+        parts.putAll(entries("ppt/slideLayouts/_rels/slideLayout1.xml.rels",rels(rel("master","slideMaster","../slideMasters/slideMaster1.xml",""))));
+        parts.putAll(entries("ppt/slideMasters/slideMaster1.xml","<p:sldMaster xmlns:p=\""+P+"\"/>"));
+        parts.putAll(entries("ppt/slideMasters/_rels/slideMaster1.xml.rels",rels(rel("theme","theme","../theme/theme1.xml",""))));
+        parts.putAll(entries("ppt/theme/theme1.xml","<a:theme xmlns:a=\""+A+"\"><a:themeElements><a:clrScheme>"
+                +"<a:accent2><a:srgbClr val=\"C0504D\"/></a:accent2></a:clrScheme></a:themeElements></a:theme>"));
+        OfficePreview.SlidePage visual=page(parts,0);
+        check(visual.background==0xfff4f6fb&&visual.items.size()==1&&!visual.limited,"visual background and one display shape");
+        OfficePreview.SlideItem item=visual.items.get(0);
+        check(item.x==685800&&item.y==5029200&&item.width==5029200&&item.height==457200,"visual layout geometry");
+        check("roundRect".equals(item.geometry)&&item.fill==0xffc0504d&&item.textColor==0xff29425c,
+                "render shape with its actual authored theme color");
+        check(item.fontSize==254000&&item.bold&&"ctr".equals(item.align)&&"ctr".equals(item.vertical)
+                &&"Coordinate check: Team A".equals(item.text),"literal label with approximate text styling");
+    }
+    private static OfficePreview.SlidePage page(Map<String,byte[]> parts,int index) throws IOException {
+        Path temp=zip(parts);
+        try(FileChannel file=FileChannel.open(temp,StandardOpenOption.READ)){return OfficePreview.readSlide(file,index);}
+        finally{Files.delete(temp);}
     }
 
     private static void limits() throws Exception {

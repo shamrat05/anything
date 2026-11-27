@@ -138,6 +138,384 @@ final class OfficePreview {
         return new Result(format, doc.sections, doc.limited);
     }
 
+    static final class SlidePage {
+        final int index,count,width,height,background;
+        final List<SlideItem> items;
+        final String text;
+        final boolean limited;
+        SlidePage(int index,int count,int width,int height,int background,List<SlideItem> items,String text,boolean limited){
+            this.index=index;this.count=count;this.width=width;this.height=height;this.background=background;
+            this.items=Collections.unmodifiableList(new ArrayList<>(items));this.text=text;this.limited=limited;
+        }
+        int memoryBytes(){
+            int bytes=128+text.length()*2;
+            for(SlideItem item:items)bytes+=128+item.text.length()*2+(item.image==null?0:item.image.length);
+            return bytes;
+        }
+    }
+
+    static final class SlideItem {
+        final int x,y,width,height,fill,stroke,textColor,fontSize;
+        final String text,align,geometry,vertical;
+        final boolean bold;
+        final byte[] image;
+        SlideItem(SlideBox b,byte[] image){
+            x=b.x;y=b.y;width=b.width;height=b.height;fill=b.fill;stroke=b.stroke;textColor=b.color;
+            fontSize=b.font;align=b.align;vertical=b.vertical;bold=b.bold;text=b.text.toString().trim();
+            geometry=b.geometry;this.image=image;
+        }
+    }
+
+    private static final int MAX_SLIDE_ITEMS=160, MAX_PAGE_IMAGES=4*1024*1024, MAX_IMAGE=2*1024*1024,
+            MAX_PREVIEW_SLIDES=512, MAX_EMU=60_000_000, DEFAULT_WIDTH=12_192_000, DEFAULT_HEIGHT=6_858_000;
+
+    /** Read only the package index, selected slide, and bounded internal resources needed for it. */
+    static SlidePage readSlide(FileChannel file,int requestedIndex) throws IOException {
+        if(file.size()>MAX_FILE)throw limit();
+        ZipDirectory.Listing listing;
+        try{listing=ZipDirectory.read(file);}catch(IOException bad){PreviewText.cancelled();throw invalid();}
+        if(listing.truncated)throw limit();
+        Map<String,ZipDirectory.Entry> entries=new HashMap<>();
+        for(ZipDirectory.Entry e:listing.entries)
+            if(e.rawName!=null&&!e.directory&&e.rawName.startsWith("ppt/")&&entries.put(e.rawName,e)!=null)throw invalid();
+        Document d=new Document(file,entries);
+        PageIndex index=new PageIndex(d);
+        d.parse("ppt/presentation.xml",index);
+        if(index.slideIds.isEmpty())throw invalid();
+        PageRelations deck=new PageRelations(d,"ppt/presentation.xml","slide");
+        d.parse("ppt/_rels/presentation.xml.rels",deck);
+        int page=Math.max(0,Math.min(requestedIndex,index.slideIds.size()-1));
+        String part=deck.parts.get(index.slideIds.get(page));
+        if(part==null)throw invalid();
+        PageShapes shapes=new PageShapes(d,"sld");
+        d.parse(part,shapes);
+        PageRelations resources=d.findOptionalRelations(part,"image","slideLayout");
+        if(resources==null)resources=new PageRelations(d,part);
+        PageShapes layout=d.optionalShapePart(resources.layout,"sldLayout");
+        PageRelations layoutRelations=resources.layout==null?null:d.findOptionalRelations(resources.layout,"slideMaster");
+        String masterPart=layoutRelations==null?null:layoutRelations.master;
+        PageShapes master=d.optionalShapePart(masterPart,"sldMaster");
+        PageRelations masterRelations=masterPart==null?null:d.findOptionalRelations(masterPart,"theme");
+        ThemeColors colors=new ThemeColors(d);
+        if(masterRelations!=null&&masterRelations.theme!=null){
+            try{d.parse(masterRelations.theme,colors);}
+            catch(IOException unavailable){PreviewText.cancelled();colors.values.clear();d.limited=true;}
+        }
+        List<SlideItem> items=new ArrayList<>();
+        Map<String,byte[]> already=new HashMap<>();
+        int remaining=MAX_PAGE_IMAGES;
+        StringBuilder summary=new StringBuilder();
+        for(SlideBox box:shapes.boxes){
+            PreviewText.cancelled();
+            String value=box.text.toString().trim();
+            if(!value.isEmpty()&&summary.length()<MAX_OUTPUT){
+                if(summary.length()>0)summary.append('\n');
+                int room=MAX_OUTPUT-summary.length();
+                if(value.length()>room)d.limited=true;
+                summary.append(cut(value,MAX_OUTPUT-summary.length()));
+            }
+            if(!box.positioned&&box.placeholder!=null){
+                SlideBox inherited=layout==null?null:layout.placeholder(box);
+                if((inherited==null||!inherited.positioned)&&master!=null){
+                    SlideBox candidate=master.placeholder(inherited==null?box:inherited);
+                    if(candidate!=null&&candidate.positioned)inherited=candidate;
+                }
+                if(inherited!=null&&inherited.positioned){
+                    box.position(inherited.x,inherited.y,inherited.width,inherited.height);
+                    if(!box.customAnchor)box.vertical=inherited.vertical;
+                    if("title".equals(box.placeholder)||"ctrTitle".equals(box.placeholder))box.titleDefaults();
+                    if(!box.customAlign&&("subTitle".equals(box.placeholder)||"ctrTitle".equals(box.placeholder)))box.align="ctr";
+                }else box.placeholderPosition(index.width,index.height);
+            }
+            box.fill=colors.lookup(box.fillTheme,box.fill);
+            box.stroke=colors.lookup(box.strokeTheme,box.stroke);
+            box.color=colors.lookup(box.colorTheme,box.color);
+            if(!box.positioned||box.width<1||box.height<1){d.limited=true;continue;}
+            byte[] image=null;
+            if(box.picture){
+                String source=box.imageId==null?null:resources.parts.get(box.imageId);
+                if(source!=null&&already.containsKey(source))image=already.get(source);
+                else if(source!=null){
+                    ZipDirectory.Entry raster=entries.get(source);
+                    if(raster!=null&&raster.size>=8&&raster.size<=Math.min(MAX_IMAGE,remaining)){
+                        remaining-=(int)raster.size;
+                        image=d.raster(source,MAX_IMAGE);
+                    }
+                    already.put(source,image);
+                }
+                if(image==null){d.limited=true;continue;}
+            }
+            if(image!=null||!value.isEmpty()||box.fill!=0||box.stroke!=0)items.add(new SlideItem(box,image));
+        }
+        int background=colors.lookup(shapes.backgroundTheme,shapes.background);
+        if(background==0&&layout!=null)background=colors.lookup(layout.backgroundTheme,layout.background);
+        if(background==0&&master!=null)background=colors.lookup(master.backgroundTheme,master.background);
+        return new SlidePage(page,index.slideIds.size(),index.width,index.height,background==0?0xffffffff:background,
+                items,summary.toString(),d.limited);
+    }
+
+    private static final class PageIndex extends Walker {
+        final ArrayList<String> slideIds=new ArrayList<>();
+        final Set<String> seen=new HashSet<>();
+        int list,width=DEFAULT_WIDTH,height=DEFAULT_HEIGHT;
+        PageIndex(Document d){super(d,"presentation",P,PS);}
+        @Override void start(String uri,String name,Attributes a){
+            if(!match(uri,P,PS))return;
+            if(depth==2&&"sldIdLst".equals(name)){list=2;return;}
+            if(depth==2&&"sldSz".equals(name)){
+                width=positive(a.getValue("cx"),MAX_EMU,DEFAULT_WIDTH);
+                height=positive(a.getValue("cy"),MAX_EMU,DEFAULT_HEIGHT);
+                if(width<1||height<1){width=DEFAULT_WIDTH;height=DEFAULT_HEIGHT;doc.limited=true;}
+            }
+            if(depth!=3||list==0||!"sldId".equals(name))return;
+            String id=relationshipId(a,"id");
+            if(id==null||id.length()>100||slideIds.size()>=MAX_PREVIEW_SLIDES||!seen.add(id)){doc.limited=true;return;}
+            slideIds.add(id);
+        }
+        @Override void end(String uri,String name){if(depth==list)list=0;}
+    }
+
+    private static final class PageRelations extends Walker {
+        final String source;
+        final Set<String> kinds=new HashSet<>(),seen=new HashSet<>();
+        final Map<String,String> parts=new HashMap<>();
+        String layout,layoutId,master,masterId,theme,themeId;
+        PageRelations(Document d,String source,String... allowed){
+            super(d,"Relationships",PACKAGE,PACKAGE);this.source=source;Collections.addAll(kinds,allowed);
+        }
+        @Override void start(String uri,String name,Attributes a){
+            if(depth!=2||!PACKAGE.equals(uri)||!"Relationship".equals(name))return;
+            if(seen.size()>=1024){doc.limited=true;return;}
+            String id=a.getValue("Id"),kind=a.getValue("Type"),target=a.getValue("Target"),mode=a.getValue("TargetMode");
+            if(id==null||id.length()>100)return;
+            if(!seen.add(id)){
+                parts.remove(id);
+                if(id.equals(layoutId)){layout=null;layoutId=null;}
+                if(id.equals(masterId)){master=null;masterId=null;}
+                if(id.equals(themeId)){theme=null;themeId=null;}
+                doc.limited=true;return;
+            }
+            if(mode!=null&&!"Internal".equals(mode)||kind==null)return;
+            String type=kind.startsWith(R+"/")?kind.substring(R.length()+1):kind.startsWith(RS+"/")?kind.substring(RS.length()+1):"";
+            if(!kinds.contains(type))return;
+            String path=packagePath(source,target);
+            if(path==null)return;
+            boolean slide="slide".equals(type),picture="image".equals(type);
+            String prefix=slide?"ppt/slides/":picture?"ppt/media/":
+                    "slideMaster".equals(type)?"ppt/slideMasters/":"theme".equals(type)?"ppt/theme/":"ppt/slideLayouts/";
+            if(!path.startsWith(prefix)||path.indexOf('/',prefix.length())>=0||!doc.entries.containsKey(path))return;
+            String lower=path.toLowerCase(Locale.ROOT);
+            if(picture?!(lower.endsWith(".png")||lower.endsWith(".jpeg")||lower.endsWith(".jpg")):!lower.endsWith(".xml"))return;
+            if(slide||picture)parts.put(id,path);
+            else if("slideMaster".equals(type)){if(master==null){master=path;masterId=id;}else doc.limited=true;}
+            else if("theme".equals(type)){if(theme==null){theme=path;themeId=id;}else doc.limited=true;}
+            else if(layout==null){layout=path;layoutId=id;}else doc.limited=true;
+        }
+    }
+    private static String relationshipId(Attributes a,String local){
+        String value=a.getValue(R,local);return value==null?a.getValue(RS,local):value;
+    }
+    private static String packagePath(String from,String target){
+        if(target==null||target.length()>240||target.isEmpty())return null;
+        for(int j=0;j<target.length();j++){
+            char c=target.charAt(j);
+            if(!(c>='a'&&c<='z'||c>='A'&&c<='Z'||c>='0'&&c<='9'||c=='/'||c=='.'||c=='_'||c=='-'))return null;
+        }
+        String combined=target.charAt(0)=='/'?target.substring(1):from.substring(0,from.lastIndexOf('/')+1)+target;
+        ArrayList<String> resolved=new ArrayList<>();
+        for(String segment:combined.split("/",-1)){
+            if(segment.isEmpty())return null;
+            if(".".equals(segment))continue;
+            if("..".equals(segment)){
+                if(resolved.size()<2)return null;
+                resolved.remove(resolved.size()-1);
+            }else resolved.add(segment);
+        }
+        return String.join("/",resolved);
+    }
+
+    private static final class SlideBox {
+        int x,y,width,height,fill,stroke,color=0xff20232a,font=304800;
+        boolean positioned,bold,picture,customFont,customBold,customAnchor,customAlign;
+        String align="l",vertical="t",geometry="rect",placeholder,placeholderId,imageId,fillTheme,strokeTheme,colorTheme;
+        final StringBuilder text=new StringBuilder();
+        void position(int x,int y,int width,int height){
+            this.x=x;this.y=y;this.width=width;this.height=height;positioned=width>0&&height>0;
+        }
+        void placeholderPosition(int w,int h){
+            boolean title="title".equals(placeholder)||"ctrTitle".equals(placeholder);
+            boolean footer="ftr".equals(placeholder)||"dt".equals(placeholder)||"sldNum".equals(placeholder);
+            int top=title?("ctrTitle".equals(placeholder)?38:10):footer?88:"subTitle".equals(placeholder)?55:28;
+            position(w/12,h*top/100,w*5/6,h*(title?17:footer?7:"subTitle".equals(placeholder)?20:58)/100);
+            if(title)titleDefaults();
+            if(!customAlign&&("ctrTitle".equals(placeholder)||"subTitle".equals(placeholder)))align="ctr";
+        }
+        void titleDefaults(){if(!customFont)font=508000;if(!customBold)bold=true;}
+    }
+
+    private static final class PageShapes extends Walker {
+        final List<SlideBox> boxes=new ArrayList<>();
+        int tree,shape,properties,transform,textDepth,para,t,style,fill,line,bg,background,shapeChars;
+        String backgroundTheme;
+        SlideBox current;
+        boolean offset,extent,firstText;
+        PageShapes(Document d,String root){super(d,root,P,PS);}
+        SlideBox placeholder(SlideBox match){
+            SlideBox byType=null;
+            for(SlideBox candidate:boxes){
+                if(candidate.placeholder==null)continue;
+                if(match.placeholderId!=null&&match.placeholderId.equals(candidate.placeholderId))return candidate;
+                if(match.placeholder.equals(candidate.placeholder))byType=candidate;
+            }
+            return byType;
+        }
+        @Override void start(String uri,String n,Attributes a){
+            boolean p=match(uri,P,PS),draw=match(uri,A,AS);
+            if(p&&"bg".equals(n)&&depth==3){bg=depth;return;}
+            if(bg>0&&draw&&background==0){
+                if("srgbClr".equals(n))background=rgb(a.getValue("val"),0);
+                if("schemeClr".equals(n))backgroundTheme=a.getValue("val");
+            }
+            if(p&&"spTree".equals(n)&&depth==3){tree=depth;return;}
+            if(tree==0)return;
+            if(depth==tree+1&&p){
+                if(!"sp".equals(n)&&!"pic".equals(n)){
+                    if(!"nvGrpSpPr".equals(n)&&!"grpSpPr".equals(n)&&!"extLst".equals(n))doc.limited=true;
+                    return;
+                }
+                if(boxes.size()>=MAX_SLIDE_ITEMS){doc.limited=true;return;}
+                shape=depth;current=new SlideBox();current.picture="pic".equals(n);
+                offset=false;extent=false;firstText=true;
+                return;
+            }
+            if(current==null)return;
+            SlideBox b=current;
+            if(p&&"ph".equals(n)&&depth==shape+3){
+                b.placeholder=a.getValue("type");if(b.placeholder==null)b.placeholder="body";
+                b.placeholderId=a.getValue("idx");return;
+            }
+            if(p&&"spPr".equals(n)&&depth==shape+1){properties=depth;return;}
+            if(p&&"txBody".equals(n)&&depth==shape+1){textDepth=depth;return;}
+            if(draw&&"blip".equals(n)&&b.picture&&depth==shape+2){b.imageId=relationshipId(a,"embed");return;}
+            if(!draw)return;
+            if(properties!=0){
+                if(depth==properties+1){
+                    if("xfrm".equals(n)){
+                        transform=depth;
+                        if(a.getValue("rot")!=null&&!"0".equals(a.getValue("rot")))doc.limited=true;
+                    }else if("prstGeom".equals(n)){
+                        String value=a.getValue("prst");if(value!=null)b.geometry=value;
+                    }else if("solidFill".equals(n))fill=depth;
+                    else if("ln".equals(n))line=depth;
+                    else if("custGeom".equals(n)||"gradFill".equals(n)||"pattFill".equals(n)||"blipFill".equals(n))doc.limited=true;
+                }
+                if(transform!=0&&depth==transform+1){
+                    if("off".equals(n)){b.x=signed(a.getValue("x"));b.y=signed(a.getValue("y"));offset=true;}
+                    if("ext".equals(n)){
+                        b.width=positive(a.getValue("cx"),MAX_EMU,0);b.height=positive(a.getValue("cy"),MAX_EMU,0);extent=true;
+                    }
+                }
+                if("srgbClr".equals(n)){
+                    if(fill!=0&&depth==fill+1)b.fill=rgb(a.getValue("val"),0);
+                    if(line!=0&&depth==line+2)b.stroke=rgb(a.getValue("val"),0);
+                }
+                if("schemeClr".equals(n)){
+                    if(fill!=0&&depth==fill+1)b.fillTheme=a.getValue("val");
+                    if(line!=0&&depth==line+2)b.strokeTheme=a.getValue("val");
+                }
+            }
+            if(textDepth==0)return;
+            if(depth==textDepth+1&&"bodyPr".equals(n)){
+                String anchor=a.getValue("anchor");
+                if("ctr".equals(anchor)||"b".equals(anchor)||"t".equals(anchor)){b.vertical=anchor;b.customAnchor=true;}
+            }
+            if(depth==textDepth+1&&"p".equals(n)){para=depth;if(b.text.length()>0)append(b.text,"\n",4096);}
+            if(para==0)return;
+            if(depth==para+1&&"pPr".equals(n)&&firstText){
+                String value=a.getValue("algn");
+                if("ctr".equals(value)||"r".equals(value)||"l".equals(value)){b.align=value;b.customAlign=true;}
+            }
+            if("br".equals(n))append(b.text,"\n",4096);
+            if("t".equals(n))t=depth;
+            if(firstText&&("rPr".equals(n)||"defRPr".equals(n))){
+                style=depth;
+                int size=positive(a.getValue("sz"),400_000,0);
+                if(size>0){b.font=Math.min(MAX_EMU,size*127);b.customFont=true;}
+                String bold=a.getValue("b");
+                if(bold!=null){b.bold="1".equals(bold)||"true".equals(bold);b.customBold=true;}
+            }
+            if(style!=0&&"srgbClr".equals(n))b.color=rgb(a.getValue("val"),b.color);
+            if(style!=0&&"schemeClr".equals(n))b.colorTheme=a.getValue("val");
+        }
+        @Override void chars(char[] c,int start,int n){
+            if(current!=null&&t>0){
+                int allowed=Math.min(n,Math.max(0,MAX_OUTPUT-shapeChars));
+                if(allowed<n)doc.limited=true;
+                if(allowed>0){appendChars(current.text,c,start,allowed,4096);shapeChars+=allowed;firstText=false;}
+            }
+        }
+        @Override void end(String uri,String name){
+            if(depth==t)t=0;if(depth==para)para=0;if(depth==style)style=0;
+            if(depth==textDepth)textDepth=0;if(depth==transform)transform=0;if(depth==properties)properties=0;
+            if(depth==fill)fill=0;if(depth==line)line=0;if(depth==bg)bg=0;if(depth==tree)tree=0;
+            if(depth==shape&&current!=null){
+                current.positioned=offset&&extent&&current.width>0&&current.height>0;
+                boxes.add(current);current=null;shape=0;
+            }
+        }
+    }
+    private static final class ThemeColors extends Walker {
+        final Map<String,Integer> values=new HashMap<>();
+        String slot;
+        int palette;
+        ThemeColors(Document d){super(d,"theme",A,AS);}
+        @Override void start(String uri,String name,Attributes a){
+            if(!match(uri,A,AS))return;
+            if(depth==3&&"clrScheme".equals(name)){palette=depth;return;}
+            if(palette==0)return;
+            if(depth==palette+1){slot=name;return;}
+            if(depth==palette+2&&slot!=null&&values.size()<16){
+                int value=rgb("srgbClr".equals(name)?a.getValue("val"):
+                        "sysClr".equals(name)?a.getValue("lastClr"):null,0);
+                if(value!=0)values.put(slot,value);
+            }
+        }
+        @Override void end(String uri,String name){
+            if(palette!=0&&depth==palette+1)slot=null;
+            if(depth==palette)palette=0;
+        }
+        int lookup(String name,int fallback){
+            if(name==null)return fallback;
+            String internal="tx1".equals(name)?"dk1":"tx2".equals(name)?"dk2":
+                    "bg1".equals(name)?"lt1":"bg2".equals(name)?"lt2":name;
+            Integer known=values.get(internal);
+            return known==null?scheme(name,fallback):known;
+        }
+    }
+    private static int signed(String raw){
+        if(raw!=null&&raw.startsWith("-"))return -positive(raw.substring(1),MAX_EMU,0);
+        return positive(raw,MAX_EMU,0);
+    }
+    private static int rgb(String raw,int fallback){
+        if(raw==null||raw.length()!=6)return fallback;
+        int out=0;
+        for(int i=0;i<6;i++){int value=Character.digit(raw.charAt(i),16);if(value<0)return fallback;out=out*16+value;}
+        return 0xff000000|out;
+    }
+    private static int scheme(String name,int fallback){
+        if(name==null)return fallback;
+        switch(name){
+            case "dk1":case "tx1":return 0xff20232a;
+            case "lt1":case "bg1":return 0xffffffff;
+            case "dk2":case "tx2":return 0xff40556c;
+            case "lt2":case "bg2":return 0xffeeeeea;
+            case "accent1":return 0xff4472c4;case "accent2":return 0xffed7d31;
+            case "accent3":return 0xffa5a5a5;case "accent4":return 0xffffc000;
+            case "accent5":return 0xff5b9bd5;case "accent6":return 0xff70ad47;
+            default:return fallback;
+        }
+    }
+
     private static final class Document {
         final FileChannel file;
         final Map<String,ZipDirectory.Entry> entries;
@@ -156,10 +534,43 @@ final class OfficePreview {
             sections.add(new Section(title, text));
         }
 
+        PageRelations findOptionalRelations(String source,String... kinds) throws IOException {
+            PageRelations rel=new PageRelations(this,source,kinds);
+            int split=source.lastIndexOf('/');
+            String part=source.substring(0,split+1)+"_rels/"+source.substring(split+1)+".rels";
+            if(!entries.containsKey(part))return rel;
+            try{parse(part,rel);return rel;}
+            catch(IOException unavailable){PreviewText.cancelled();limited=true;return null;}
+        }
+        PageShapes optionalShapePart(String part,String type) throws IOException {
+            if(part==null)return null;
+            PageShapes parsed=new PageShapes(this,type);
+            boolean visibleLimited=limited;
+            try{parse(part,parsed);limited=visibleLimited;return parsed;}
+            catch(IOException unavailable){PreviewText.cancelled();limited=true;return null;}
+        }
+        byte[] raster(String part,int budget) throws IOException {
+            ZipDirectory.Entry entry=entries.get(part);
+            if(entry==null||entry.special||entry.encrypted||entry.crc<0||entry.size<8||entry.size>budget
+                    ||entry.compressedSize>budget+64*1024L)return null;
+            try(PartInput input=new PartInput(ZipDirectory.open(file,entry),entry)){
+                byte[] bytes=new byte[(int)entry.size];
+                int at=0;
+                while(at<bytes.length){int got=input.read(bytes,at,bytes.length-at);if(got<1)throw invalid();at+=got;}
+                if(input.read()!=-1)throw invalid();
+                input.verify();
+                if((bytes[0]&255)==0x89&&bytes[1]=='P'&&bytes[2]=='N'&&bytes[3]=='G'
+                        &&bytes[4]==13&&bytes[5]==10&&bytes[6]==26&&bytes[7]==10
+                        ||(bytes[0]&255)==255&&(bytes[1]&255)==216&&(bytes[2]&255)==255)return bytes;
+            }catch(IOException unavailable){PreviewText.cancelled();}
+            return null;
+        }
+
         void parse(String part, Walker handler) throws IOException {
             ZipDirectory.Entry entry = entries.get(part);
             if (entry == null || entry.special || entry.encrypted || entry.crc < 0) throw invalid();
             if (entry.size < 0 || entry.size > MAX_PART_BYTES || entry.size > MAX_TOTAL_BYTES - expanded) throw limit();
+            expanded += (int)entry.size;
             try (PartInput bytes = new PartInput(ZipDirectory.open(file, entry), entry);
                  PushbackInputStream input = new PushbackInputStream(bytes, 3)) {
                 Charset encoding = detectEncoding(input);
@@ -177,7 +588,6 @@ final class OfficePreview {
                     xml.parse(new InputSource(safe));
                     if (!handler.root) throw invalid();
                     bytes.verify();
-                    expanded += bytes.count;
                 }
             } catch (IOException e) { throw e; }
             catch (Exception e) {

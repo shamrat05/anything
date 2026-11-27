@@ -34,6 +34,8 @@ import android.widget.Toast;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -49,7 +51,7 @@ public final class DexViewerActivity extends Activity {
             new ArrayBlockingQueue<>(3), task -> new Thread(task, "dex-inspector"),
             new ThreadPoolExecutor.AbortPolicy());
     static { WORKER.allowCoreThreadTimeOut(true); }
-    private static final int CREATE_SMALI = 923;
+    private static final int CREATE_SMALI = 923, REFERENCE_HISTORY = 20, MAX_CHOICES = 200;
     private static final Handler EXPORT_MAIN = new Handler(Looper.getMainLooper());
     private static final ThreadPoolExecutor EXPORT = new ThreadPoolExecutor(1,1,15,TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(1), task -> new Thread(task,"smali-export"),new ThreadPoolExecutor.AbortPolicy());
@@ -67,7 +69,13 @@ public final class DexViewerActivity extends Activity {
     private long generation;
     private boolean showingCode, destroyed;
     private String restoreItem;
-    private Button findCode, dexPicker, saveCode;
+    private Button findCode, dexPicker, saveCode, referenceButton;
+    private DexInspector.Index openedIndex;
+    private DexInspector.Item currentClass;
+    private final ArrayDeque<Bundle> referenceHistory=new ArrayDeque<>();
+    private Bundle restoreLocation;
+    private List<SmaliReferences.Ref> references=Collections.emptyList();
+    private AlertDialog referenceDialog;
     private List<String> dexEntries = Collections.emptyList();
     private String selectedDex;
     private AlertDialog dexDialog;
@@ -120,6 +128,8 @@ public final class DexViewerActivity extends Activity {
         bar.addView(dexPicker,new LinearLayout.LayoutParams(-2,dp(56)));
         saveCode=toolbarAction("Save","Save Smali as",this::chooseSmaliDestination);
         bar.addView(saveCode,new LinearLayout.LayoutParams(-2,dp(56)));
+        referenceButton=toolbarAction("Refs","Open Smali references",this::chooseReference);
+        bar.addView(referenceButton,new LinearLayout.LayoutParams(-2,dp(56)));
         screen.addView(bar, new LinearLayout.LayoutParams(-1, -2));
         search = new EditText(this);
         search.setSingleLine(); search.setHint("Find a class"); search.setTextSize(16);
@@ -143,6 +153,10 @@ public final class DexViewerActivity extends Activity {
             search.setText(saved.getString("query", ""));
             restoreItem = saved.getString("class");
             restoreFind = saved.getBundle("smaliFind");
+            restoreLocation=saved.getBundle("codeLocation");
+            ArrayList<Bundle> savedHistory=saved.getParcelableArrayList("referenceHistory");
+            if(savedHistory!=null)for(Bundle entry:savedHistory)
+                if(entry!=null && referenceHistory.size()<REFERENCE_HISTORY)referenceHistory.addLast(entry);
             selectedDex = saved.getString("dexScope");
             exportKey = saved.getString("exportKey"); exportDigest = saved.getString("exportDigest");
             exportDestination = saved.getParcelable("exportDestination");
@@ -185,13 +199,17 @@ public final class DexViewerActivity extends Activity {
                     throw new IOException("The file changed during inspection. Reopen it and try again.");
             }
             return () -> {
+                openedIndex=indexed;
                 classes = indexed.items;
                 dexEntries = DexEntryPicker.ordered(indexed.entries);
                 if (!dexEntries.contains(selectedDex)) selectedDex=null;
                 showClassList();
                 if (restoreItem != null) {
                     String last = restoreItem; restoreItem = null;
-                    for (DexInspector.Item item : classes) if (item.key().equals(last)) { openClass(item); return; }
+                    for (DexInspector.Item item : classes) if (item.key().equals(last)) {
+                        renderClass(item,null,restoreLocation); return;
+                    }
+                    referenceHistory.clear(); restoreLocation=null;
                     restoreFind = null;
                     if (exportKey != null) rejectExport("The selected class is no longer available.");
                 }
@@ -202,6 +220,8 @@ public final class DexViewerActivity extends Activity {
     private void showClassList() {
         showingCode = false;
         selectedKey = null;
+        currentClass=null;
+        references=Collections.emptyList(); referenceButton.setVisibility(View.GONE);
         if (codePane != null) { codePane.closeFind(); codePane = null; }
         findCode.setVisibility(View.GONE);
         saveCode.setVisibility(View.GONE);
@@ -241,7 +261,18 @@ public final class DexViewerActivity extends Activity {
 
     private String selectedKey;
     private void openClass(DexInspector.Item item) {
+        referenceHistory.clear();
+        renderClass(item,null,null);
+    }
+
+    private void renderClass(DexInspector.Item item,SmaliReferences.Ref wanted,Bundle location) {
         main.removeCallbacks(refreshResults);
+        if(codePane!=null)codePane.closeFind();
+        codePane=null;
+        references=Collections.emptyList();
+        referenceButton.setVisibility(View.GONE);
+        findCode.setVisibility(View.GONE);
+        currentClass=item;
         showingCode = true;
         selectedKey = item.key();
         heading.setText("Smali");
@@ -258,16 +289,24 @@ public final class DexViewerActivity extends Activity {
             catch(IOException notExportable) { bytes=null; }
             final byte[] snapshot=bytes;
             String digest=snapshot==null?null:SmaliExportPlan.digest(snapshot);
-            return () -> showCode(code,snapshot,digest);
+            List<SmaliReferences.Ref> links=SmaliReferences.scan(disassembly.text);
+            SmaliReferences.Anchor anchor=wanted==null?null:SmaliReferences.declaration(disassembly.text,wanted);
+            return () -> showCode(code,snapshot,digest,links,anchor,wanted,location);
         });
     }
 
-    private void showCode(CharSequence code,byte[] bytes,String digest) {
+    private void showCode(CharSequence code,byte[] bytes,String digest,List<SmaliReferences.Ref> links,
+                          SmaliReferences.Anchor anchor,SmaliReferences.Ref wanted,Bundle location) {
         content.removeAllViews();
-        codePane = new SmaliCodePane(this,theme,code);
+        references=links;
+        codePane = new SmaliCodePane(this,theme,code,references,this::followReference);
         content.addView(codePane,new FrameLayout.LayoutParams(-1,-1));
-        codePane.restoreFind(restoreFind);
-        restoreFind = null;
+        if(location==null)codePane.restoreFind(restoreFind);
+        else codePane.restoreLocation(location);
+        restoreFind=null; restoreLocation=null;
+        if(anchor!=null)codePane.showMember(anchor);
+        else if(wanted!=null && wanted.member!=null)noteExport("Class opened. That member isn't in the displayed Smali.");
+        referenceButton.setVisibility(links.isEmpty()?View.GONE:View.VISIBLE);
         findCode.setVisibility(View.VISIBLE);
         updateFindButton();
         saveBytes=bytes; saveDigest=digest;
@@ -275,6 +314,65 @@ public final class DexViewerActivity extends Activity {
             rejectExport("The selected Smali changed. Open it again before saving.");
         updateSaveButton();
         finishExportIfReady();
+    }
+
+    private void chooseReference() {
+        if(codePane==null || referenceDialog!=null)return;
+        LinkedHashMap<String,SmaliReferences.Ref> unique=new LinkedHashMap<>();
+        for(SmaliReferences.Ref link:references){
+            if(link.member==null && currentClass!=null && link.owner.equals(currentClass.descriptor))continue;
+            unique.putIfAbsent(link.label(),link);
+            if(unique.size()>=MAX_CHOICES)break;
+        }
+        if(unique.isEmpty()){noteExport("This class has no other references.");return;}
+        List<SmaliReferences.Ref> choices=new ArrayList<>(unique.values());
+        String[] labels=unique.keySet().toArray(new String[0]);
+        showReferenceDialog("Smali references",labels,which->followReference(choices.get(which)));
+    }
+
+    private void followReference(SmaliReferences.Ref ref) {
+        if(codePane==null || currentClass==null || openedIndex==null || exportKey!=null)return;
+        DexInspector.Item local=openedIndex.exact(ref.owner,currentClass.dex);
+        if(local!=null){jump(local,ref);return;}
+        List<DexInspector.Item> targets=openedIndex.targets(ref.owner);
+        if(targets.isEmpty()){noteExport("External reference. That class isn't in these DEX files.");return;}
+        if(targets.size()==1){jump(targets.get(0),ref);return;}
+        String[] labels=new String[targets.size()];
+        for(int i=0;i<labels.length;i++)labels[i]=targets.get(i).dex;
+        showReferenceDialog("Choose a DEX file",labels,which->jump(targets.get(which),ref));
+    }
+
+    private void showReferenceDialog(String title,String[] rows,java.util.function.IntConsumer accept) {
+        if(referenceDialog!=null)return;
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle(title)
+                .setItems(rows,(window,which)->{
+                    referenceDialog=null;
+                    window.dismiss();
+                    accept.accept(which);
+                }).setNegativeButton("Close",null).create();
+        referenceDialog=dialog;
+        dialog.setOnDismissListener(window->{if(referenceDialog==dialog)referenceDialog=null;});
+        dialog.show();
+    }
+
+    private void jump(DexInspector.Item target,SmaliReferences.Ref ref) {
+        if(codePane==null || currentClass==null || exportKey!=null
+                || (target==currentClass && ref.member==null))return;
+        Bundle entry=codePane.saveLocation();
+        entry.putString("type",currentClass.descriptor);
+        entry.putString("dex",currentClass.dex);
+        if(referenceHistory.size()>=REFERENCE_HISTORY)referenceHistory.removeFirst();
+        referenceHistory.addLast(entry);
+        renderClass(target,ref,null);
+    }
+
+    private boolean backToReferenceSource() {
+        while(openedIndex!=null && !referenceHistory.isEmpty()) {
+            Bundle entry=referenceHistory.removeLast();
+            DexInspector.Item source=openedIndex.exact(entry.getString("type"),entry.getString("dex"));
+            if(source!=null){renderClass(source,null,entry);return true;}
+        }
+        return false;
     }
 
     private Button toolbarAction(String label,String contentDescription,Runnable click) {
@@ -441,12 +539,17 @@ public final class DexViewerActivity extends Activity {
     private void handleBack() {
         if (codePane != null && codePane.isFinding()) {
             codePane.closeFind(); updateFindButton();
-        } else if (showingCode) { cancelWork(); showClassList(); }
+        } else if (showingCode) {
+            if(!backToReferenceSource()){cancelWork();showClassList();}
+        }
         else finish();
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putString("query", search.getText().toString()); state.putString("class", selectedKey);
         state.putString("dexScope",selectedDex);
+        if(codePane!=null)state.putBundle("codeLocation",codePane.saveLocation());
+        else if(restoreLocation!=null)state.putBundle("codeLocation",restoreLocation);
+        state.putParcelableArrayList("referenceHistory",new ArrayList<>(referenceHistory));
         state.putString("exportKey",exportKey); state.putString("exportDigest",exportDigest);
         state.putParcelable("exportDestination",exportDestination);
         if (codePane != null) state.putBundle("smaliFind",codePane.saveFind());
@@ -456,6 +559,9 @@ public final class DexViewerActivity extends Activity {
     @Override protected void onDestroy() {
         destroyed = true; signal.cancel(); cancelWork(); main.removeCallbacksAndMessages(null);
         if(dexDialog!=null) dexDialog.dismiss();
+        if(referenceDialog!=null)referenceDialog.dismiss();
+        openedIndex=null;
+        referenceHistory.clear();
         saveBytes=null;
         classes = Collections.emptyList();
         super.onDestroy();

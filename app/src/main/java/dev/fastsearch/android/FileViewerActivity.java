@@ -541,6 +541,9 @@ public final class FileViewerActivity extends Activity {
         }else if(kind==Kind.PDF){
             format.add(new SpotlightTour.Step("Change PDF pages","The arrows below the page go to the previous or next page. The page count is shown between them.",()->formatGuideTarget));
             format.add(new SpotlightTour.Step("Read the fine print","Pinch or double-tap to zoom into the page, then drag to pan.",()->image));
+        }else if(kind==Kind.OFFICE&&shown!=null&&shown.slide!=null){
+            format.add(new SpotlightTour.Step("Move between slides","The buttons below the slide go to the previous or next slide.",()->formatGuideTarget));
+            format.add(new SpotlightTour.Step("Read the slide text","Pinch or double-tap to zoom. Tap Slide text for a selectable text version.",()->viewerGuideControl(previewContent,readerSource?"Slide view":"Slide text")));
         }else if(image!=null){
             format.add(new SpotlightTour.Step("Fit the image","The middle button resets zoom. Use − or +, pinch or double-tap to zoom, then drag to pan.",()->formatGuideTarget));
             if(kind==Kind.SVG)format.add(new SpotlightTour.Step("Read the SVG source","Tap Source below the image to inspect its text. Tap Image to return.",()->viewerGuideControl(previewContent,"Source")));
@@ -844,7 +847,9 @@ public final class FileViewerActivity extends Activity {
         View placeholder=navigationPlaceholder;navigationPlaceholder=null;
         loadingPlaceholder=placeholder;
         if(placeholder!=null)previewContent.addView(placeholder,new FrameLayout.LayoutParams(-1,-1));
-        else addLoadingIndicator(previewContent,kind==Kind.PDF?"Opening page "+(page+1):"Opening preview");
+        else addLoadingIndicator(previewContent,kind==Kind.PDF?"Opening page "+(page+1)
+                :kind==Kind.OFFICE&&OfficePreview.format(name)==OfficePreview.Format.SLIDES
+                    ?"Opening slide "+(page+1):"Opening preview");
         job = new PreviewJob(this, getApplicationContext(), uri, kind, page, generation);
         job.restoreState=restoreOnLoad;restoreOnLoad=false;
         if(uri==null&&session!=null){job.entry=currentEntry();job.allowRoot=session.root;}
@@ -872,7 +877,7 @@ public final class FileViewerActivity extends Activity {
         details.setText(metadata());View cover=loadingPlaceholder;loadingPlaceholder=null;previewContent.removeAllViews();
         if (kind == Kind.IMAGE || kind == Kind.PDF || kind==Kind.SVG&&!readerSource) showImage(result);
         else if (kind == Kind.TEXT || kind==Kind.MARKDOWN || kind==Kind.HTML || kind==Kind.SVG) showDocument(result);
-        else if (kind == Kind.OFFICE) showOffice(result.office);
+        else if (kind == Kind.OFFICE) {if(result.slide!=null)showSlides(result.slide);else showOffice(result.office);}
         else if (kind == Kind.ZIP) showArchive(result.archive);
         else if (kind == Kind.STREAM_ARCHIVE) showStreamArchive(StreamArchiveExtraction.format(name),result.tar);
         else if (kind == Kind.SEVEN_Z) showSevenZip(result.sevenZip);
@@ -938,6 +943,66 @@ public final class FileViewerActivity extends Activity {
     private void changePage(int value) {
         if (value < 0 || value >= pageCount) return;
         page = value; zoom = 1; centerX = centerY = .5f; load();
+    }
+
+    private void showSlides(PresentationSlide slide){
+        page=slide.index;pageCount=slide.count;
+        details.setText(metadata()+" · "+pageCount+(pageCount==1?" slide":" slides"));
+        LinearLayout column=new LinearLayout(this);column.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout slides=new FrameLayout(this);
+        column.addView(slides,new LinearLayout.LayoutParams(-1,0,1));
+
+        image=new ZoomPreviewView(this);image.setBackgroundColor(stageColor(kind));
+        image.setContentDescription("Slide "+(page+1)+" of "+pageCount+". Pinch or double tap to zoom. Use Slide text to read the content.");
+        FrameLayout.LayoutParams drawing=new FrameLayout.LayoutParams(-1,-1);
+        int inset=dp(12);drawing.setMargins(inset,inset,inset,inset);
+        slides.addView(image,drawing);
+        image.setPicture(slide.picture);image.restore(zoom,centerX,centerY);
+        if(slide.picture!=null)image.setOnLongClickListener(view->{selectCurrent();return true;});
+
+        TextView outline=text(slide.text.isEmpty()?"No readable text on this slide.":slide.text,16,INK);
+        outline.setTextIsSelectable(true);outline.setGravity(Gravity.TOP|Gravity.START);
+        outline.setPadding(dp(20),dp(16),dp(20),dp(24));outline.setLineSpacing(dp(4),1.08f);simpleTextLayout(outline);
+        textScroll=new EdgeFastScroll.Document(this);textScroll.setFillViewport(true);
+        textScroll.addView(outline,new ScrollView.LayoutParams(-1,-2));
+        textScroll.addOnLayoutChangeListener(new RestoreScroll(scrollY));
+        slides.addView(textScroll,new FrameLayout.LayoutParams(-1,-1));
+
+        if(slide.limited){
+            TextView notice=text("Some slide styles or objects couldn’t be rendered.",12,MUTED);
+            notice.setGravity(Gravity.CENTER);notice.setPadding(dp(12),dp(3),dp(12),dp(3));
+            column.addView(notice,new LinearLayout.LayoutParams(-1,-2));
+        }
+        column.addView(viewerRule(),new LinearLayout.LayoutParams(-1,dp(1)));
+        LinearLayout tools=row();tools.setGravity(Gravity.CENTER);tools.setBackgroundColor(CHROME);
+        Button out=button("−"),fit=button("Fit"),in=button("+"),mode=button("");
+        out.setContentDescription("Zoom out");fit.setContentDescription("Fit slide");in.setContentDescription("Zoom in");
+        out.setOnClickListener(v->image.zoomBy(1/1.5f));fit.setOnClickListener(v->image.fit());in.setOnClickListener(v->image.zoomBy(1.5f));
+        for(Button control:new Button[]{out,fit,in})tools.addView(control,new LinearLayout.LayoutParams(dp(48),dp(48)));
+        tools.addView(mode,new LinearLayout.LayoutParams(dp(100),dp(48)));
+        Runnable showMode=()->{
+            image.setVisibility(readerSource?View.GONE:View.VISIBLE);
+            textScroll.setVisibility(readerSource?View.VISIBLE:View.GONE);
+            mode.setText(readerSource?"Slide view":"Slide text");
+            for(Button control:new Button[]{out,fit,in})control.setEnabled(!readerSource);
+        };
+        showMode.run();mode.setOnClickListener(v->{readerSource=!readerSource;showMode.run();});
+        column.addView(tools,new LinearLayout.LayoutParams(-1,dp(48)));
+
+        LinearLayout pages=row();pages.setGravity(Gravity.CENTER);pages.setBackgroundColor(CHROME);
+        Button back=button("Previous slide"),next=button("Next slide");
+        TextView position=text("Slide "+(page+1)+" / "+pageCount,13,MUTED);
+        position.setGravity(Gravity.CENTER);
+        position.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        back.setEnabled(page>0);next.setEnabled(page+1<pageCount);
+        back.setOnClickListener(v->{scrollY=0;changePage(page-1);});
+        next.setOnClickListener(v->{scrollY=0;changePage(page+1);});
+        pages.addView(back,new LinearLayout.LayoutParams(0,dp(48),1));
+        pages.addView(position,new LinearLayout.LayoutParams(dp(94),dp(48)));
+        pages.addView(next,new LinearLayout.LayoutParams(0,dp(48),1));
+        column.addView(pages,new LinearLayout.LayoutParams(-1,dp(48)));
+        formatGuideTarget=pages;
+        previewContent.addView(column,new FrameLayout.LayoutParams(-1,-1));
     }
 
     private void showOffice(OfficePreview.Result office) {
@@ -2572,6 +2637,7 @@ public final class FileViewerActivity extends Activity {
         PreviewText.Result text;
         CodeSyntax.Model code;
         OfficePreview.Result office;
+        PresentationSlide slide;
         boolean transportStream;
         ZipDirectory.Listing archive;
         TarArchiveListing.Listing tar;
@@ -2587,7 +2653,7 @@ public final class FileViewerActivity extends Activity {
             if (bitmap != null) { if (!sharedBitmap&&!bitmap.isRecycled()) bitmap.recycle(); bitmap = null; }
             if (media != null) { try { media.close(); } catch (IOException ignored) { } media = null; }
             if (apk != null) { apk.close(); apk = null; }
-            picture=null;formatted=null;text = null;code=null;office=null; archive = null; tar = null; sevenZip = null;
+            picture=null;formatted=null;text = null;code=null;office=null;slide=null; archive = null; tar = null; sevenZip = null;
         }
     }
 
@@ -2637,8 +2703,10 @@ public final class FileViewerActivity extends Activity {
                 if(restoreState&&preciseMetadata)synchronized(VIEW_STATES){result.state=VIEW_STATES.get(result.key);}
                 int wantedPage=result.state==null?requestedPage:result.state.page;
                 String cacheKey=result.key+':'+kind+':'+(kind==Kind.PDF?wantedPage:0)+':'+sourceName+':'+language;
-                // API 26 exposes only whole-second metadata; re-read rather than reuse an ambiguous identity.
-                PreviewData existing=preciseMetadata && kind!=Kind.APK && kind!=Kind.SEVEN_Z?CACHE.get(cacheKey):null;
+                // API 26 exposes only whole-second metadata. Slides are read lazily; don't retain pages and their images in the general cache.
+                boolean isPresentation=kind==Kind.OFFICE&&OfficePreview.format(sourceName)==OfficePreview.Format.SLIDES;
+                boolean cacheable=preciseMetadata&&kind!=Kind.APK&&kind!=Kind.SEVEN_Z&&!isPresentation;
+                PreviewData existing=cacheable?CACHE.get(cacheKey):null;
                 if(existing!=null){existing.copyTo(result);return result;}
                 if (kind == Kind.IMAGE || kind == Kind.PDF) {
                     if (result.size > MAX_DOCUMENT_BYTES) throw new PreviewLimit("Files larger than 128 MiB need another app.");
@@ -2652,7 +2720,16 @@ public final class FileViewerActivity extends Activity {
                     checkCancelled();if(kind==Kind.MARKDOWN)result.formatted=RichText.markdown(result.text.text);else if(kind==Kind.HTML)result.formatted=RichText.html(result.text.text);
                 } else if (kind == Kind.OFFICE) {
                     try (ParcelFileDescriptor.AutoCloseInputStream input = new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) {
-                        result.office = OfficePreview.read(input.getChannel(),OfficePreview.format(sourceName));
+                        if(isPresentation){
+                            try{result.slide=PresentationSlide.render(OfficePreview.readSlide(input.getChannel(),wantedPage),false);}
+                            catch(IOException unavailable){
+                                checkCancelled();
+                                // The same bounded text-only reader stays available when visual drawing is unsupported.
+                                input.getChannel().position(0);
+                                try{result.office=OfficePreview.read(input.getChannel(),OfficePreview.Format.SLIDES);}
+                                catch(IOException noOutline){throw unavailable;}
+                            }
+                        }else result.office=OfficePreview.read(input.getChannel(),OfficePreview.format(sourceName));
                     }
                 } else if (kind == Kind.ZIP) {
                     try (ParcelFileDescriptor.AutoCloseInputStream input = new ParcelFileDescriptor.AutoCloseInputStream(ParcelFileDescriptor.dup(file.getFileDescriptor()))) { result.archive = ZipDirectory.read(input.getChannel()); }
@@ -2676,7 +2753,7 @@ public final class FileViewerActivity extends Activity {
                 checkCancelled();
                 if(file!=null){
                     if(!result.identity.equals(RootFileProvider.identity(Os.fstat(file.getFileDescriptor())))){throw new IOException("File changed while loading.");}
-                    if(preciseMetadata && kind!=Kind.APK && kind!=Kind.SEVEN_Z)CACHE.put(cacheKey,new PreviewData(result));
+                    if(cacheable)CACHE.put(cacheKey,new PreviewData(result));
                 }
             } catch (StackOverflowError complex) {
                 result.close();result.error="This file is too complex to preview.";

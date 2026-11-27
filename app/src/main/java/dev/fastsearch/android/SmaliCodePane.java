@@ -9,9 +9,16 @@ import android.text.Editable;
 import android.text.InputFilter;
 import android.text.Layout;
 import android.text.Spannable;
+import android.text.SpannableString;
 import android.text.Spanned;
 import android.text.TextWatcher;
 import android.text.style.BackgroundColorSpan;
+import android.text.style.UnderlineSpan;
+import android.view.GestureDetector;
+import android.view.MotionEvent;
+import android.view.ViewTreeObserver;
+import java.util.List;
+import java.util.function.Consumer;
 import android.view.Gravity;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
@@ -31,12 +38,13 @@ final class SmaliCodePane extends LinearLayout {
     private final EditText find;
     private final Button previous, next;
     private final LinearLayout findPanel;
-    private final BackgroundColorSpan highlight;
+    private final BackgroundColorSpan highlight, memberHighlight;
     private int[] hits = new int[0];
     private int current = -1, length;
     private final Runnable update = () -> applyQuery(null, 0);
 
-    SmaliCodePane(Context context, UiTheme theme, CharSequence code) {
+    SmaliCodePane(Context context, UiTheme theme, CharSequence code,List<SmaliReferences.Ref> refs,
+                  Consumer<SmaliReferences.Ref> follow) {
         super(context);
         setOrientation(VERTICAL);
         setBackgroundColor(theme.surface);
@@ -86,7 +94,7 @@ final class SmaliCodePane extends LinearLayout {
 
         vertical = new ScrollView(context);
         horizontal = new HorizontalScrollView(context);
-        body = new TextView(context);
+        body = new ReferenceText(context,refs,follow);
         body.setTextColor(theme.ink);
         body.setTextSize(14);
         body.setTypeface(Typeface.MONOSPACE);
@@ -95,11 +103,15 @@ final class SmaliCodePane extends LinearLayout {
         body.setHorizontallyScrolling(true);
         body.setPadding(dp(16),dp(12),dp(16),dp(24));
         body.setTextIsSelectable(true);
-        body.setText(code,TextView.BufferType.SPANNABLE);
+        SpannableString styled=new SpannableString(code);
+        for(SmaliReferences.Ref ref:refs)
+            styled.setSpan(new UnderlineSpan(),ref.start,ref.end,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        body.setText(styled,TextView.BufferType.SPANNABLE);
         horizontal.addView(body,new HorizontalScrollView.LayoutParams(-2,-2));
         vertical.addView(horizontal,new ScrollView.LayoutParams(-1,-2));
         addView(vertical,new LinearLayout.LayoutParams(-1,0,1));
         highlight = new BackgroundColorSpan(theme.dark ? 0xFF334E70 : 0xFFD4E7FF);
+        memberHighlight=new BackgroundColorSpan(theme.dark?0xFF493C23:0xFFFFE6A7);
     }
 
     boolean isFinding() { return findPanel.getVisibility() == VISIBLE; }
@@ -138,6 +150,84 @@ final class SmaliCodePane extends LinearLayout {
             openFind(false);
             applyQuery(saved.getInt("match",0),0);
         }
+    }
+
+    Bundle saveLocation() {
+        Bundle result=saveFind();
+        result.putInt("x",horizontal.getScrollX()); result.putInt("y",vertical.getScrollY());
+        Spanned text=(Spanned)body.getText();
+        result.putInt("memberStart",text.getSpanStart(memberHighlight));
+        result.putInt("memberEnd",text.getSpanEnd(memberHighlight));
+        return result;
+    }
+
+    void restoreLocation(Bundle saved) {
+        restoreFind(saved);
+        int start=saved.getInt("memberStart",-1), end=saved.getInt("memberEnd",-1);
+        if(start>=0 && end>start && end<=body.length())
+            ((Spannable)body.getText()).setSpan(memberHighlight,start,end,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        afterLayout(()->{
+            horizontal.scrollTo(saved.getInt("x"),0);
+            vertical.scrollTo(0,saved.getInt("y"));
+        });
+    }
+
+    void showMember(SmaliReferences.Anchor anchor) {
+        ((Spannable)body.getText()).setSpan(memberHighlight,anchor.start,anchor.end,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        afterLayout(()->{
+            Layout layout=body.getLayout();
+            if(layout==null)return;
+            int line=layout.getLineForOffset(anchor.start);
+            int y=body.getTotalPaddingTop()+layout.getLineTop(line);
+            int x=body.getTotalPaddingLeft()+(int)layout.getPrimaryHorizontal(anchor.start);
+            vertical.scrollTo(0,Math.max(0,y-vertical.getHeight()/4));
+            horizontal.scrollTo(Math.max(0,x-horizontal.getWidth()/4),0);
+        });
+    }
+
+    private void afterLayout(Runnable action) {
+        body.post(()->{
+            if(!isAttachedToWindow())return;
+            if(body.getLayout()!=null && !isLayoutRequested()){action.run();return;}
+            ViewTreeObserver observer=body.getViewTreeObserver();
+            observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener(){
+                @Override public boolean onPreDraw(){
+                    if(observer.isAlive())observer.removeOnPreDrawListener(this);
+                    if(isAttachedToWindow())action.run();
+                    return true;
+                }
+            });
+        });
+    }
+
+    private static final class ReferenceText extends TextView {
+        private final GestureDetector clicks;
+        ReferenceText(Context context,List<SmaliReferences.Ref> refs,Consumer<SmaliReferences.Ref> follow) {
+            super(context);
+            clicks=new GestureDetector(context,new GestureDetector.SimpleOnGestureListener(){
+                @Override public boolean onDown(MotionEvent event){return true;}
+                @Override public boolean onSingleTapConfirmed(MotionEvent event){
+                    Layout layout=getLayout();
+                    if(layout==null || !isAttachedToWindow() || hasSelection())return false;
+                    float y=event.getY()-getTotalPaddingTop()+getScrollY();
+                    if(y<0 || y>=layout.getHeight())return false;
+                    int line=layout.getLineForVertical((int)y);
+                    float x=event.getX()-getTotalPaddingLeft()+getScrollX();
+                    if(x<layout.getLineLeft(line) || x>=layout.getLineRight(line))return false;
+                    SmaliReferences.Ref ref=SmaliReferences.at(refs,layout.getOffsetForHorizontal(line,x));
+                    if(ref==null)return false;
+                    performClick();
+                    follow.accept(ref);
+                    return true;
+                }
+            });
+        }
+        @Override public boolean onTouchEvent(MotionEvent event){
+            boolean handled=super.onTouchEvent(event);
+            clicks.onTouchEvent(event);
+            return handled;
+        }
+        @Override public boolean performClick(){return super.performClick();}
     }
 
     private String lastQuery = "";
